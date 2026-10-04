@@ -1,5 +1,7 @@
-import hashlib, json, os, re, subprocess, tempfile, threading, time, uuid
+import json, os, re, sqlite3, subprocess, tempfile, threading, time, uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -7,12 +9,16 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
-MODELS = [os.environ.get("GEMINI_MODEL", "gemini-flash-latest"), "gemini-3.8-flash"]  # 앞 모델이 과부하면 다음 모델로
+# 앞 모델이 과부하(503)거나 무료 한도 초과(429)면 다음 모델로 (모델마다 한도가 따로)
+MODELS = [os.environ.get("GEMINI_MODEL", "gemini-flash-latest"), "gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
 COOKIES = os.environ.get("COOKIES_BROWSER")  # e.g. "chrome" or "safari", for Instagram login walls
 TOKEN = os.environ.get("APP_TOKEN")  # 설정하면 모든 /api 요청에 X-Token 헤더 필요 (공개 서버용)
 COOKIES_TXT = os.environ.get("COOKIES_TXT")  # Netscape 형식 쿠키 내용 (클라우드에서 인스타 로그인 벽 우회용, 선택)
-CACHE = Path(__file__).parent / "cache"
-CACHE.mkdir(exist_ok=True)
+DB_URL = os.environ.get("DATABASE_URL")  # 있으면 Postgres(클라우드), 없으면 로컬 SQLite 파일
+DB_FILE = Path(__file__).parent / "recipes.db"
+if os.environ.get("RENDER") and not DB_URL:  # Render 디스크는 재시작 때 지워지므로, DB 없이 뜨면 레시피가 조용히 사라진다
+    raise SystemExit("DATABASE_URL 환경변수가 필요합니다 (Render Environment에 Postgres 연결 문자열 설정)")
+HERE = Path(__file__).parent
 
 client = genai.Client()  # reads GEMINI_API_KEY
 app = FastAPI()
@@ -112,21 +118,63 @@ def generate(f, caption):
 jobs: dict = {}
 
 
+def db(sql, args=()):
+    """SQLite/Postgres 공용. SQL은 ? 자리표시자로 작성."""
+    if DB_URL:
+        import psycopg
+        con, sql = psycopg.connect(DB_URL, autocommit=True), sql.replace("?", "%s")
+    else:
+        con = sqlite3.connect(DB_FILE, isolation_level=None)
+    try:
+        cur = con.execute(sql, args)
+        return cur.fetchall() if cur.description else []
+    finally:
+        con.close()
+
+
+db("CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, created TEXT NOT NULL)")
+db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE NOT NULL, title TEXT NOT NULL,
+      data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
+
+
+def new_id():
+    return uuid.uuid4().hex
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def norm(url):  # 같은 영상이 추적 파라미터(igsh 등)만 달라 중복 저장되지 않게
+    u = urlparse(url)
+    vid = u.path.strip("/").split("/")[-1]
+    if u.netloc == "youtu.be" or (u.netloc.endswith("youtube.com") and u.path.startswith("/shorts/")):
+        return f"https://www.youtube.com/watch?v={vid}"  # 짧은 링크/쇼츠도 watch 형태로 통일
+    q = {k: v for k, v in parse_qs(u.query).items() if k == "v"}
+    return urlunparse((u.scheme, u.netloc, u.path.rstrip("/"), "", urlencode(q, doseq=True), ""))
+
+
 def check(token):
     if TOKEN and token != TOKEN:
         raise HTTPException(401, "접근 토큰이 올바르지 않습니다")
 
 
-def work(job_id: str, url: str, path: Path):
+def by_url(url):
+    r = db("SELECT id, data, folder_id FROM recipes WHERE url = ?", (url,))
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2]} if r else None
+
+
+def work(job_id: str, url: str, folder_id):
     try:
         data = make_recipe(url)
         data["url"] = url
-        path.write_text(json.dumps(data, ensure_ascii=False))
-        jobs[job_id] = {"status": "done", "recipe": data}
+        db("INSERT INTO recipes (id, url, title, data, folder_id, created) VALUES (?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now()))
+        jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
     except HTTPException as e:
-        jobs[job_id] = {"status": "error", "error": e.detail}
+        jobs[job_id].update(status="error", error=e.detail)
     except Exception as e:  # ponytail: 예상 못 한 오류도 화면에 보이게만 함
-        jobs[job_id] = {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        jobs[job_id].update(status="error", error=f"{type(e).__name__}: {e}")
 
 
 @app.post("/api/recipe")
@@ -135,13 +183,12 @@ def recipe(body: dict, x_token: str | None = Header(None)):
     m = re.search(r"https?://\S+", body.get("url") or "")  # 공유 텍스트에서 링크만 추출
     if not m:
         raise HTTPException(400, "링크를 찾을 수 없습니다")
-    url = m.group(0)
-    path = CACHE / (hashlib.sha1(url.encode()).hexdigest() + ".json")
-    if path.exists():
-        return {"status": "done", "recipe": json.loads(path.read_text())}
-    job_id = uuid.uuid4().hex
-    jobs[job_id] = {"status": "pending"}
-    threading.Thread(target=work, args=(job_id, url, path), daemon=True).start()
+    url = norm(m.group(0))
+    if saved := by_url(url):
+        return {"status": "done", "recipe": saved}
+    job_id = new_id()
+    jobs[job_id] = {"status": "pending", "url": url}
+    threading.Thread(target=work, args=(job_id, url, body.get("folder_id")), daemon=True).start()
     return {"status": "pending", "id": job_id}
 
 
@@ -151,6 +198,84 @@ def job(job_id: str, x_token: str | None = Header(None)):
     return jobs.get(job_id) or {"status": "error", "error": "작업을 찾을 수 없습니다 (서버가 재시작됐을 수 있음)"}
 
 
+@app.delete("/api/job/{job_id}")
+def dismiss(job_id: str, x_token: str | None = Header(None)):
+    check(x_token)
+    jobs.pop(job_id, None)
+    return {}
+
+
+@app.get("/api/library")
+def library(x_token: str | None = Header(None)):
+    check(x_token)
+    return {
+        "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
+        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "created": r[3], "url": r[4]}
+                    for r in db("SELECT id, title, folder_id, created, url FROM recipes ORDER BY created DESC")],
+        "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error") if x in v}}
+                 for k, v in jobs.items() if v["status"] != "done"],
+    }
+
+
+@app.get("/api/recipes/{rid}")
+def get_recipe(rid: str, x_token: str | None = Header(None)):
+    check(x_token)
+    r = db("SELECT id, data, folder_id FROM recipes WHERE id = ?", (rid,))
+    if not r:
+        raise HTTPException(404, "레시피를 찾을 수 없습니다")
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2]}
+
+
+@app.patch("/api/recipes/{rid}")
+def move_recipe(rid: str, body: dict, x_token: str | None = Header(None)):
+    check(x_token)
+    db("UPDATE recipes SET folder_id = ? WHERE id = ?", (body.get("folder_id") or None, rid))
+    return {}
+
+
+@app.delete("/api/recipes/{rid}")
+def delete_recipe(rid: str, x_token: str | None = Header(None)):
+    check(x_token)
+    db("DELETE FROM recipes WHERE id = ?", (rid,))
+    return {}
+
+
+@app.post("/api/folders")
+def add_folder(body: dict, x_token: str | None = Header(None)):
+    check(x_token)
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "폴더 이름이 필요합니다")
+    fid = new_id()
+    db("INSERT INTO folders (id, name, created) VALUES (?,?,?)", (fid, name, now()))
+    return {"id": fid, "name": name}
+
+
+@app.patch("/api/folders/{fid}")
+def rename_folder(fid: str, body: dict, x_token: str | None = Header(None)):
+    check(x_token)
+    db("UPDATE folders SET name = ? WHERE id = ?", ((body.get("name") or "").strip(), fid))
+    return {}
+
+
+@app.delete("/api/folders/{fid}")
+def delete_folder(fid: str, x_token: str | None = Header(None)):
+    check(x_token)
+    db("UPDATE recipes SET folder_id = NULL WHERE folder_id = ?", (fid,))  # 레시피는 '분류 안 됨'으로 이동
+    db("DELETE FROM folders WHERE id = ?", (fid,))
+    return {}
+
+
 @app.get("/")
 def index():
-    return FileResponse(Path(__file__).parent / "index.html")
+    return FileResponse(HERE / "index.html")
+
+
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse(HERE / "manifest.json")
+
+
+@app.get("/icon.png")
+def icon():
+    return FileResponse(HERE / "icon.png")

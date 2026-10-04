@@ -1,5 +1,7 @@
 .venv/
 cache/
+recipes.db
 server.log
 __pycache__/
 .env
+*.log
