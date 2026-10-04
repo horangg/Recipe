@@ -15,7 +15,7 @@
   * { box-sizing:border-box; }
   html { background:var(--bg); }
   /* 글자 크기는 한 가지(18px)만 쓴다. 위계는 색(dim)과 굵기로만 표현 */
-  body { margin:0 auto; max-width:640px; padding:20px 20px calc(110px + env(safe-area-inset-bottom)); background:var(--bg); color:var(--fg);
+  body { margin:0 auto; max-width:640px; padding:20px; background:var(--bg); color:var(--fg);
          font:400 18px/1.5 "Helvetica Neue", Helvetica, Arial, "Apple SD Gothic Neo", sans-serif; letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
          word-break:keep-all; overflow-wrap:break-word; }
   a { color:inherit; }
@@ -42,6 +42,9 @@
            background-image:linear-gradient(45deg,transparent 50%,var(--fg) 50%),linear-gradient(135deg,var(--fg) 50%,transparent 50%); background-size:4px 4px; background-position:calc(100% - 5px) 55%,calc(100% - 1px) 55%; background-repeat:no-repeat; }
   p { margin:0 0 14px; }
   .step { display:grid; grid-template-columns:28px 1fr; gap:6px; }
+  /* 맨 아래 여백: 우측 하단 + 버튼과 iPhone 하단 막대(Safari 도구 막대, 홈 인디케이터)에 마지막 항목이 가리지 않게.
+     body 패딩 대신 실제 요소로 둬서 스크롤 가능한 높이에 확실히 포함시킨다 */
+  #end { height:calc(180px + env(safe-area-inset-bottom)); }
   #status { padding:8px 0 0; }
   #status:empty { display:none; }
   /* 우측 하단 플로팅 추가 버튼 (+ 는 글자가 아니라 선으로 그려 글자 크기 규칙을 지킨다) */
@@ -59,6 +62,7 @@
 <div id="jobs"></div>
 <div id="status" class="dim"></div>
 <div id="main"></div>
+<div id="end" aria-hidden="true"></div>
 
 <button id="fab" aria-label="레시피 추가" onclick="openSheet()"></button>
 <div id="sheet" hidden>
