@@ -3,38 +3,40 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="레시피">
-<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#2b35ff" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon.png">
 <title>레시피 추출</title>
 <style>
-  :root { --bg:#fff; --fg:#2b35ff; --dim:rgba(43,53,255,.55); }
-  @media (prefers-color-scheme: dark) { :root { --bg:#2b35ff; --fg:#fff; --dim:rgba(255,255,255,.65); } }
+  :root { color-scheme: light; --bg:#fff; --fg:#2b35ff; --dim:rgba(43,53,255,.55); }
   * { box-sizing:border-box; }
   html { background:var(--bg); }
+  /* 글자 크기는 한 가지(18px)만 쓴다. 위계는 색(dim)과 굵기로만 표현 */
   body { margin:0 auto; max-width:640px; padding:20px 20px calc(32px + env(safe-area-inset-bottom)); background:var(--bg); color:var(--fg);
-         font:400 18px/1.2 "Helvetica Neue", Helvetica, Arial, "Apple SD Gothic Neo", sans-serif; letter-spacing:-.01em; -webkit-font-smoothing:antialiased; word-break:keep-all; overflow-wrap:break-word; }
+         font:400 18px/1.25 "Helvetica Neue", Helvetica, Arial, "Apple SD Gothic Neo", sans-serif; letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+         word-break:keep-all; overflow-wrap:break-word; }
   a { color:inherit; }
-  b { font-weight:600; }
-  .cap { font-size:11px; line-height:1.25; }
+  b, .title { font-weight:600; }
   .dim { color:var(--dim); }
   .r { border-top:1px solid var(--fg); padding:12px 0; }
   .c2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   .c3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
   .ra { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:baseline; }
-  .big { font-size:20px; line-height:1.18; }
-  .title { font-size:28px; line-height:1.1; font-weight:500; letter-spacing:-.02em; }
+  .item { display:grid; grid-template-columns:56px 1fr; gap:14px; align-items:center; text-decoration:none; }
+  .head { display:grid; grid-template-columns:56px 1fr; gap:14px; align-items:center; padding:4px 0 18px; }
+  .th { width:56px; height:56px; object-fit:cover; display:block; }
+  .ph { width:56px; height:56px; border:1px solid var(--fg); }
   .txt { all:unset; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
   .txt:disabled { opacity:.4; }
   .on { background:var(--fg); color:var(--bg); padding:0 4px; margin-left:-4px; }
   .list > * { display:block; margin-bottom:3px; }
   form { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:end; padding-bottom:12px; }
-  input { font:inherit; font-size:20px; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:6px 0; outline:none; min-width:0; }
+  input { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:6px 0; outline:none; min-width:0; }
   input::placeholder { color:var(--dim); }
-  select { font:inherit; font-size:18px; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:0 14px 0 0; appearance:none; -webkit-appearance:none; max-width:100%;
+  select { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:0 14px 0 0; appearance:none; -webkit-appearance:none; max-width:100%;
            background-image:linear-gradient(45deg,transparent 50%,var(--fg) 50%),linear-gradient(135deg,var(--fg) 50%,transparent 50%); background-size:4px 4px; background-position:calc(100% - 5px) 55%,calc(100% - 1px) 55%; background-repeat:no-repeat; }
   p { margin:0 0 14px; }
 </style>
@@ -50,6 +52,7 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const store = { get: k => { try { return localStorage[k] || ''; } catch { return ''; } }, set: (k, v) => { try { localStorage[k] = v; } catch {} } };
+const thumb = t => t ? `<img class="th" src="${t}" alt="">` : '<div class="ph"></div>';
 
 // ---- API (토큰이 없거나 틀리면 한 번 물어봄)
 async function api(path, method = 'GET', body) {
@@ -75,8 +78,8 @@ async function loadLib() { lib = await api('/api/library'); renderJobs(); }
 
 function renderJobs() {
   $('jobs').innerHTML = lib.jobs.map(j => j.status === 'error'
-    ? `<div class="r ra"><div><b>실패</b> ${esc(j.error)}</div><button class="txt cap" onclick="dismiss('${j.id}')">닫기</button></div>`
-    : `<div class="r c2"><div>분석 중…</div><div class="cap dim">${esc(j.url)}</div></div>`).join('');
+    ? `<div class="r ra"><div><b>실패</b> ${esc(j.error)}</div><button class="txt" onclick="dismiss('${j.id}')">닫기</button></div>`
+    : `<div class="r c2"><div>분석 중…</div><div class="dim">${esc(j.url)}</div></div>`).join('');
 }
 async function dismiss(id) { await api('/api/job/' + id, 'DELETE'); await loadLib(); }
 
@@ -90,14 +93,13 @@ async function showList() {
   const opt = (id, label) => `<button class="txt ${cur === id ? 'on' : ''}" style="text-decoration:none" onclick="setCur('${id}')">${esc(label)}</button>`;
   const inFolder = cur.length > 4;
   $('main').innerHTML = `
-    <div class="r c2"><div class="cap">폴더</div>
+    <div class="r c2"><div class="dim">폴더</div>
       <div class="list">${opt('all', `전체 ${lib.recipes.length}`)}${opt('none', '분류 안 됨')}${lib.folders.map(f => opt(f.id, f.name)).join('')}
         <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
-    ${inFolder ? `<div class="r ra cap"><span class="dim">${esc(fname(cur))}</span>
+    ${inFolder ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
-    ${shown.length ? shown.map(r => `<a class="r ra" style="text-decoration:none" href="#r/${r.id}"><span class="big">${esc(r.title)}</span>
-      <span class="cap dim" style="text-align:right">${new Date(r.created).toLocaleDateString('ko-KR')}${cur === 'all' && r.folder_id ? '<br>' + esc(fname(r.folder_id)) : ''}</span></a>`).join('')
-      : '<div class="r cap dim">저장된 레시피가 없습니다. 위에 링크를 붙여넣어 보세요.</div>'}`;
+    ${shown.length ? shown.map(r => `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${cur === 'all' && r.folder_id ? `<br><span class="dim">${esc(fname(r.folder_id))}</span>` : ''}</span></a>`).join('')
+      : '<div class="r dim">저장된 레시피가 없습니다. 위에 링크를 붙여넣어 보세요.</div>'}`;
   if (lib.jobs.some(j => j.status === 'pending')) timer = setTimeout(() => !location.hash && showList(), 4000);
 }
 function setCur(id) { cur = id; store.set('cur', id); showList(); }
@@ -116,27 +118,27 @@ function tsLink(url, ts) {
   const m = /^(\d+):(\d+)$/.exec(ts || ''); if (!m) return '';
   const sec = +m[1] * 60 + +m[2];
   const href = /youtu/.test(url) ? url + (url.includes('?') ? '&' : '?') + 't=' + sec : url;
-  return `<a class="cap" href="${esc(href)}" target="_blank" style="margin-right:6px">${ts}</a>`;
+  return `<a href="${esc(href)}" target="_blank" class="dim" style="margin-right:6px">${ts}</a>`;
 }
 async function showRecipe(id) {
   clearTimeout(timer);
-  $('main').innerHTML = '<div class="r cap dim">불러오는 중…</div>';
+  $('main').innerHTML = '<div class="r dim">불러오는 중…</div>';
   try {
     const [r] = await Promise.all([api('/api/recipes/' + id), lib.folders.length ? 0 : loadLib()]);
     $('main').innerHTML = `
-      <div class="r ra cap"><a href="#">← 목록</a><button class="txt" onclick="delRecipe('${r.id}')">삭제</button></div>
-      <div class="title" style="padding:4px 0 18px">${esc(r.title)}</div>
-      <div class="r c3"><div><div class="cap dim">분량</div><div>${esc(r.servings)}</div></div>
-        <div><div class="cap dim">시간</div><div>${r.minutes}분</div></div>
-        <div><div class="cap dim">원본</div><a href="${esc(r.url)}" target="_blank">영상 ↗</a></div></div>
-      <div class="r"><div class="cap dim">폴더</div>
+      <div class="r ra"><a href="#">← 목록</a><button class="txt" onclick="delRecipe('${r.id}')">삭제</button></div>
+      <div class="head">${thumb(r.thumb)}<div class="title">${esc(r.title)}</div></div>
+      <div class="r c3"><div><div class="dim">분량</div><div>${esc(r.servings)}</div></div>
+        <div><div class="dim">시간</div><div>${r.minutes}분</div></div>
+        <div><div class="dim">원본</div><a href="${esc(r.url)}" target="_blank">영상 ↗</a></div></div>
+      <div class="r"><div class="dim">폴더</div>
         <select onchange="move('${r.id}', this.value)"><option value="">분류 안 됨</option>
           ${lib.folders.map(f => `<option value="${f.id}" ${f.id === r.folder_id ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select></div>
-      <div class="r c2"><div class="cap">재료</div>
+      <div class="r c2"><div class="dim">재료</div>
         <div class="list">${r.ingredients.map(i => `<span>${esc(i.name)} <span class="dim">${esc(i.amount)}</span></span>`).join('')}</div></div>
-      ${r.sections.map(s => `<div class="r"><div class="cap" style="margin-bottom:10px">${esc(s.title)}</div>${s.steps.map(st =>
-        `<p class="big">${tsLink(r.url, st.timestamp)}${esc(st.text)}${st.ingredients.length ? `<br><span class="cap dim">${st.ingredients.map(i => esc(i.name + ' ' + i.amount)).join(' · ')}</span>` : ''}</p>`).join('')}</div>`).join('')}
-      ${r.tips.length ? `<div class="r c2"><div class="cap">팁</div><div class="list">${r.tips.map(t => `<span>${esc(t)}</span>`).join('')}</div></div>` : ''}`;
+      ${r.sections.map(s => `<div class="r"><div class="dim" style="margin-bottom:10px">${esc(s.title)}</div>${s.steps.map(st =>
+        `<p>${tsLink(r.url, st.timestamp)}${esc(st.text)}${st.ingredients.length ? `<br><span class="dim">${st.ingredients.map(i => esc(i.name + ' ' + i.amount)).join(' · ')}</span>` : ''}</p>`).join('')}</div>`).join('')}
+      ${r.tips.length ? `<div class="r c2"><div class="dim">팁</div><div class="list">${r.tips.map(t => `<span>${esc(t)}</span>`).join('')}</div></div>` : ''}`;
   } catch (e) { $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)} <a href="#">← 목록</a></div>`; }
 }
 async function move(id, folder_id) { await api('/api/recipes/' + id, 'PATCH', { folder_id }); lib.folders.length = 0; await loadLib(); }
@@ -144,7 +146,7 @@ async function delRecipe(id) { if (confirm('이 레시피를 삭제할까요?'))
 
 // ---- 추출
 async function go(url) {
-  $('b').disabled = true; $('jobs').innerHTML = '<div class="r c2"><div>분석 중…</div><div class="cap dim">30초~2분, 화면을 켜 두세요</div></div>';
+  $('b').disabled = true; $('jobs').innerHTML = '<div class="r c2"><div>분석 중…</div><div class="dim">30초~2분, 화면을 켜 두세요</div></div>';
   try {
     let d = await api('/api/recipe', 'POST', { url, folder_id: cur.length > 4 ? cur : null });
     const id = d.id;  // job 응답에는 id가 없으므로 따로 보관

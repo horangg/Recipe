@@ -131,12 +131,40 @@ def fetch(url: str, d: str):
     return video, meta.get("description") or meta.get("title") or ""
 
 
-def make_recipe(url: str) -> dict:
-    if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
-        # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
-        return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), "").text)
+def thumb_from(src: str, d: str):
+    """가운데를 정사각형으로 자른 120px JPEG를 data URI로. 실패하면 None (썸네일 때문에 레시피가 실패하면 안 됨)."""
+    out = f"{d}/t.jpg"
+    for seek in (["-ss", "1"], []):  # 영상은 1초 지점, 이미지/짧은 영상은 처음 프레임
+        try:
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *seek, "-i", src, "-frames:v", "1",
+                            "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=120:120", "-q:v", "6", out],
+                           check=True, capture_output=True, timeout=60)
+            return "data:image/jpeg;base64," + base64.b64encode(Path(out).read_bytes()).decode()
+        except Exception:
+            continue
+    return None
+
+
+def youtube_thumb(url: str, d: str):
+    try:
+        vid = parse_qs(urlparse(url).query)["v"][0]
+        path = f"{d}/yt.jpg"
+        with urllib.request.urlopen(f"https://img.youtube.com/vi/{vid}/mqdefault.jpg", timeout=15) as r, open(path, "wb") as f:
+            f.write(r.read())
+        return thumb_from(path, d)
+    except Exception:
+        return None
+
+
+def make_recipe(url: str):
+    """(레시피 dict, 썸네일 data URI 또는 None)"""
     with tempfile.TemporaryDirectory() as d:
+        if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
+            # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
+            thumb = youtube_thumb(url, d)
+            return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), "").text), thumb
         video, caption = fetch(url, d)
+        thumb = thumb_from(str(video), d)
         f = client.files.upload(file=str(video))
         while f.state.name == "PROCESSING":
             time.sleep(2)
@@ -147,7 +175,7 @@ def make_recipe(url: str) -> dict:
             r = generate(f, caption)
         finally:
             client.files.delete(name=f.name)
-    return json.loads(r.text)
+    return json.loads(r.text), thumb
 
 
 def generate(f, caption):
@@ -188,6 +216,12 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
       data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
 
 
+try:
+    db("ALTER TABLE recipes ADD COLUMN thumb TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
+except Exception:
+    pass
+
+
 def new_id():
     return uuid.uuid4().hex
 
@@ -211,16 +245,16 @@ def check(token):
 
 
 def by_url(url):
-    r = db("SELECT id, data, folder_id FROM recipes WHERE url = ?", (url,))
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2]} if r else None
+    r = db("SELECT id, data, folder_id, thumb FROM recipes WHERE url = ?", (url,))
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3]} if r else None
 
 
 def work(job_id: str, url: str, folder_id):
     try:
-        data = make_recipe(url)
+        data, thumb = make_recipe(url)
         data["url"] = url
-        db("INSERT INTO recipes (id, url, title, data, folder_id, created) VALUES (?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
-           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now()))
+        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb) VALUES (?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb))
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
     except HTTPException as e:
         jobs[job_id].update(status="error", error=e.detail)
@@ -261,8 +295,8 @@ def library(x_token: str | None = Header(None)):
     check(x_token)
     return {
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
-        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "created": r[3], "url": r[4]}
-                    for r in db("SELECT id, title, folder_id, created, url FROM recipes ORDER BY created DESC")],
+        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "created": r[3], "url": r[4], "thumb": r[5]}
+                    for r in db("SELECT id, title, folder_id, created, url, thumb FROM recipes ORDER BY created DESC")],
         "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error") if x in v}}
                  for k, v in jobs.items() if v["status"] != "done"],
     }
@@ -271,10 +305,10 @@ def library(x_token: str | None = Header(None)):
 @app.get("/api/recipes/{rid}")
 def get_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)
-    r = db("SELECT id, data, folder_id FROM recipes WHERE id = ?", (rid,))
+    r = db("SELECT id, data, folder_id, thumb FROM recipes WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "레시피를 찾을 수 없습니다")
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2]}
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3]}
 
 
 @app.patch("/api/recipes/{rid}")
