@@ -41,7 +41,7 @@ if os.environ.get("RENDER") and not DB_URL:  # Render 디스크는 재시작 때
     raise SystemExit("DATABASE_URL 환경변수가 필요합니다 (Render Environment에 Postgres 연결 문자열 설정)")
 HERE = Path(__file__).parent
 
-client = genai.Client()  # reads GEMINI_API_KEY
+client = genai.Client()  # reads GEMINI_API_KEY. (주의: http_options timeout을 주면 files.upload가 멈춘다 — 제한 시간은 아래 expire()로 처리)
 app = FastAPI()
 app.add_middleware(GZipMiddleware, minimum_size=1000)  # 목록 JSON(썸네일 포함) 전송량 감소
 
@@ -74,6 +74,7 @@ class Recipe(BaseModel):
 PROMPT = """첨부된 요리 콘텐츠(영상, 사진 게시물, 또는 글)를 종합해 한국어 레시피를 만들어라.
 - 영상이면 화면·음성·자막을, 사진 게시물이면 사진 속 글자와 사진 순서를, 글이면 본문을 근거로 삼는다.
 - 아래 캡션/본문에 재료·분량이 있으면 가장 우선 신뢰하고, 영상·사진과 다르면 영상·사진 기준으로 보정.
+- 캡션/본문 뒤에 [댓글]이 이어질 수 있다. 게시자·고정 댓글이나 인기 댓글에 레시피(재료·분량·순서)가 있으면 활용하고, 잡담·감상 댓글은 무시한다.
 - 재료는 같은 것끼리 합치고 분량은 단위를 통일(g, ml, 큰술 등). 분량을 알 수 없으면 "적당량".
 - 조리 순서는 섹션으로 나누고, 각 단계에 그 단계에 쓰는 재료를 붙여라. timestamp는 영상일 때만 해당 시점(mm:ss)을 쓰고, 사진·글이면 빈 문자열.
 - 모든 글(title, servings, 재료 이름·분량, 섹션 제목, 단계, 팁)을 한국어로 쓰고 영어 단어를 남기지 않는다(KFC 같은 브랜드 약어 제외). 단위는 한국식으로: tsp→작은술, tbsp→큰술, cup→컵 (예: "2큰술").
@@ -241,6 +242,52 @@ def thumb_for(url: str, d: str):
     return instagram_cover(url, d) if "instagram.com" in url else None
 
 
+QTY = re.compile(r"\d+(?:[./]\d+)?\s*(?:(?:kg|g|ml|l|cc|oz|tsp|tbsp|cups?)(?![a-zA-Z])|컵|큰술|작은술|스푼|숟가락|개|쪽|그램|리터)", re.I)
+
+
+def has_recipe(text: str) -> bool:
+    """본문에 레시피가 있는지 가늠: '500g', '2큰술' 같은 분량 표현이 3개 이상이면 있다고 본다."""
+    return len(QTY.findall(text or "")) >= 3
+
+
+def ytdlp_json(url: str, *extra):
+    """yt-dlp 메타데이터(JSON). 막히거나 실패하면 {} — 설명·댓글은 있으면 좋은 정보라서 실패해도 추출은 계속한다."""
+    try:
+        r = subprocess.run(["yt-dlp", "--no-warnings", "--no-playlist", "--skip-download", "-J", *extra, url],
+                           capture_output=True, text=True, check=True, timeout=90)
+        return json.loads(r.stdout)
+    except Exception as e:
+        print("ytdlp_json failed:", str(getattr(e, "stderr", e))[-120:], flush=True)
+        return {}
+
+
+def comments_text(url: str, limit: int = 40, budget: int = 5000) -> str:
+    """게시자·고정 댓글을 먼저, 그다음 좋아요 순으로 모은 댓글 모음. 못 가져오면 ''."""
+    extra = ["--write-comments"]
+    if "youtube" in url:
+        extra += ["--extractor-args", f"youtube:max_comments={limit},{limit},0,0;comment_sort=top"]
+    comments = ytdlp_json(url, *extra).get("comments") or []
+    comments.sort(key=lambda c: (not (c.get("author_is_uploader") or c.get("is_pinned")), -(c.get("like_count") or 0)))
+    out, used = [], 0
+    for c in comments[:limit]:
+        tag = "[게시자] " if c.get("author_is_uploader") else "[고정] " if c.get("is_pinned") else ""
+        line = f"- {tag}{' '.join((c.get('text') or '').split())[:600]}"
+        if used + len(line) > budget:
+            break
+        out.append(line)
+        used += len(line)
+    return "\n".join(out)
+
+
+def with_comments(url: str, caption: str) -> str:
+    """본문에 레시피가 없으면 댓글을 읽어 본문 뒤에 붙인다."""
+    if has_recipe(caption):
+        return caption
+    comments = comments_text(url)
+    print(f"comments: {len(comments)}자 ({'본문에 레시피 없음 -> 댓글 참고' if comments else '댓글 없음/못 가져옴'})", flush=True)
+    return caption + ("\n\n[댓글]\n" + comments if comments else "")
+
+
 def instagram_kind(url: str):
     """'video' | 'image' | None(임베드를 못 읽음). 사진 게시물(여러 장 포함)은 영상 주소가 없다."""
     try:
@@ -292,7 +339,8 @@ def make_recipe(url: str):
         if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
             # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
             thumb = youtube_thumb(url, d)
-            return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), "").text), thumb, author_for(url)
+            caption = with_comments(url, ytdlp_json(url).get("description") or "")  # 설명란 + (레시피가 없으면) 댓글
+            return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), caption).text), thumb, author_for(url)
         if "instagram.com" in url and instagram_kind(url) == "image":
             # 사진 게시물(여러 장 포함): 캡션 + 사진 전체를 Gemini에 넘긴다
             page = embed_page(url)
@@ -322,6 +370,7 @@ def make_recipe(url: str):
                 except Exception as e3:
                     print("og:image failed:", e3, flush=True)
             return json.loads(generate(None, text).text), thumb, author_for(url)
+        caption = with_comments(url, caption)
         thumb = instagram_cover(url, d) or thumb_from(str(video), d)  # 대표 이미지 우선, 없으면 영상 프레임
         f = client.files.upload(file=str(video))
         while f.state.name == "PROCESSING":
@@ -479,6 +528,13 @@ def generate(f, caption):
 
 
 jobs: dict = {}
+JOB_LIMIT = 480  # 초. 이보다 오래 '분석 중'이면 멈춘 것으로 보고 오류로 바꾼다 (응답이 멈춰도 화면이 영원히 기다리지 않게)
+
+
+def expire(job_id: str):
+    j = jobs.get(job_id)
+    if j and j["status"] == "pending" and time.time() - j.get("t0", time.time()) > JOB_LIMIT:
+        j.update(status="error", error="분석이 너무 오래 걸려 중단했어요. 잠시 후 다시 시도해 주세요")
 
 
 _conn, _lock = None, threading.Lock()
@@ -592,7 +648,7 @@ def recipe(body: dict, x_token: str | None = Header(None)):
     if saved := by_url(url):
         return {"status": "done", "recipe": saved}
     job_id = new_id()
-    jobs[job_id] = {"status": "pending", "url": url}
+    jobs[job_id] = {"status": "pending", "url": url, "t0": time.time()}
     threading.Thread(target=work, args=(job_id, url, body.get("folder_id")), daemon=True).start()
     return {"status": "pending", "id": job_id}
 
@@ -600,7 +656,9 @@ def recipe(body: dict, x_token: str | None = Header(None)):
 @app.get("/api/job/{job_id}")
 def job(job_id: str, x_token: str | None = Header(None)):
     check(x_token)
-    return jobs.get(job_id) or {"status": "error", "error": "작업을 찾을 수 없습니다 (서버가 재시작됐을 수 있음)"}
+    expire(job_id)
+    j = jobs.get(job_id)
+    return {k: v for k, v in j.items() if k != "t0"} if j else {"status": "error", "error": "작업을 찾을 수 없습니다 (서버가 재시작됐을 수 있음)"}
 
 
 @app.delete("/api/job/{job_id}")
@@ -613,6 +671,8 @@ def dismiss(job_id: str, x_token: str | None = Header(None)):
 @app.get("/api/library")
 def library(x_token: str | None = Header(None)):
     check(x_token)
+    for k in list(jobs):
+        expire(k)
     return {
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
         "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": r[3], "ings": r[4], "author": r[5]}
