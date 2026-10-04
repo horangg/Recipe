@@ -15,8 +15,23 @@ COOKIES = os.environ.get("COOKIES_BROWSER")  # e.g. "chrome" or "safari", for In
 TOKEN = os.environ.get("APP_TOKEN")  # 설정하면 모든 /api 요청에 X-Token 헤더 필요 (공개 서버용)
 # 인스타 로그인 벽 우회용 쿠키(Netscape 형식). 우선순위: COOKIES_B64(base64 한 줄, 붙여넣기 사고에 안전) > COOKIES_TXT > Secret File
 _secret = Path("/etc/secrets/cookies.txt")
-COOKIES_TXT = (base64.b64decode(os.environ["COOKIES_B64"]).decode() if os.environ.get("COOKIES_B64") else None) \
-    or os.environ.get("COOKIES_TXT") or (_secret.read_text() if _secret.exists() else None)
+COOKIES_ERR = None  # 설정이 잘못돼도 서버는 뜨고, 인스타 요청 때 이유를 알려준다
+
+
+def load_cookies():
+    global COOKIES_ERR
+    b64 = os.environ.get("COOKIES_B64")
+    if b64:
+        try:
+            b64 = "".join(b64.split()).strip("\"'")
+            return base64.b64decode(b64 + "=" * (-len(b64) % 4)).decode()
+        except Exception:
+            COOKIES_ERR = f"COOKIES_B64 값이 올바른 base64가 아닙니다 (현재 {len(b64)}자). 다시 복사해 붙여넣으세요."
+            return None
+    return os.environ.get("COOKIES_TXT") or (_secret.read_text() if _secret.exists() else None)
+
+
+COOKIES_TXT = load_cookies()
 DB_URL = os.environ.get("DATABASE_URL")  # 있으면 Postgres(클라우드), 없으면 로컬 SQLite 파일
 DB_FILE = Path(__file__).parent / "recipes.db"
 if os.environ.get("RENDER") and not DB_URL:  # Render 디스크는 재시작 때 지워지므로, DB 없이 뜨면 레시피가 조용히 사라진다
@@ -71,9 +86,14 @@ def fetch(url: str, d: str):
     base = ["yt-dlp", "--no-playlist", "--no-warnings"]
     if COOKIES:
         base += ["--cookies-from-browser", COOKIES]
+    if COOKIES_ERR:
+        raise HTTPException(500, COOKIES_ERR)
     if COOKIES_TXT:
-        if not any(l.count("\t") == 6 for l in COOKIES_TXT.splitlines()):  # 탭 7칸 = 정상 쿠키 줄
+        lines = COOKIES_TXT.splitlines()
+        if not any(l.count("\t") == 6 for l in lines):  # 탭 7칸 = 정상 쿠키 줄
             raise HTTPException(500, "쿠키 설정이 올바르지 않습니다 (Netscape 형식 쿠키 줄이 없음). COOKIES_B64를 다시 만드세요.")
+        if not any("\tsessionid\t" in l for l in lines):
+            raise HTTPException(500, "쿠키에 로그인 정보(sessionid)가 없습니다. 값이 잘렸거나 로그아웃 상태에서 추출했을 수 있습니다.")
         (Path(d) / "cookies.txt").write_text(COOKIES_TXT)
         base += ["--cookies", f"{d}/cookies.txt"]
     try:
