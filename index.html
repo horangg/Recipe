@@ -57,9 +57,10 @@ async function go(url) {
   $('b').disabled = true; $('out').innerHTML = '<p class="muted">분석 중… (30초~2분, 화면을 켜 두세요)</p>';
   try {
     let d = await api('/api/recipe', { method: 'POST', body: JSON.stringify({ url }) });
+    const id = d.id;  // job 응답에는 id가 없으므로 따로 보관
     while (d.status === 'pending') {  // 짧은 요청을 반복해 Safari/프록시 타임아웃을 피함
       await new Promise(r => setTimeout(r, 3000));
-      d = await api('/api/job/' + d.id);
+      d = await api('/api/job/' + id);
     }
     if (d.status === 'error') throw new Error(d.error);
     render(d.recipe);
