@@ -76,7 +76,8 @@ PROMPT = """첨부된 요리 콘텐츠(영상, 사진 게시물, 또는 글)를 
 - 아래 캡션/본문에 재료·분량이 있으면 가장 우선 신뢰하고, 영상·사진과 다르면 영상·사진 기준으로 보정.
 - 재료는 같은 것끼리 합치고 분량은 단위를 통일(g, ml, 큰술 등). 분량을 알 수 없으면 "적당량".
 - 조리 순서는 섹션으로 나누고, 각 단계에 그 단계에 쓰는 재료를 붙여라. timestamp는 영상일 때만 해당 시점(mm:ss)을 쓰고, 사진·글이면 빈 문자열.
-- title과 모든 글은 한국어로 쓴다. title은 자연스러운 한국어 요리 이름으로 쓰고(외국 음식은 한국에서 통용되는 표기나 한글 음역), 영어 제목을 그대로 쓰지 않는다.
+- 모든 글(title, servings, 재료 이름·분량, 섹션 제목, 단계, 팁)을 한국어로 쓰고 영어 단어를 남기지 않는다(KFC 같은 브랜드 약어 제외). 단위는 한국식으로: tsp→작은술, tbsp→큰술, cup→컵 (예: "2큰술").
+- title은 자연스러운 한국어 요리 이름으로 쓰고(외국 음식은 한국에서 통용되는 표기나 한글 음역), 영어 제목을 그대로 쓰지 않는다.
 - 콘텐츠에 없는 내용은 지어내지 마라. 요리 레시피가 아니면 title에 "레시피 아님"이라고 쓰고 나머지는 비워라.
 
 캡션/본문:
@@ -337,7 +338,7 @@ def make_recipe(url: str):
 
 def prefer(model: str):
     """성공한 모델을 맨 앞으로: 한도(429)가 찬 모델을 요청마다 다시 시도하느라 몇 초씩 낭비하지 않는다."""
-    if model in MODELS:
+    if model in MODELS and "lite" not in model:  # lite는 지시를 덜 지켜 영어가 섞이므로 마지막 수단으로만 쓴다
         MODELS.insert(0, MODELS.pop(MODELS.index(model)))
 
 
@@ -361,6 +362,60 @@ def ask(prompt: str):
 def one_line(t):
     lines = [l.strip().strip("\"'“”‘’「」") for l in (t or "").splitlines() if l.strip()]
     return lines[0] if lines else ""
+
+
+UNITS = [(r"tsp|teaspoons?", "작은술"), (r"tbsp|tablespoons?", "큰술"), (r"cups?", "컵"), (r"pinch(?:es)?", "꼬집"),
+         (r"cloves?", "쪽"), (r"slices?", "장"), (r"pieces?|pcs?", "개"), (r"handfuls?", "줌")]
+
+
+def ko_units(t: str) -> str:
+    """영어 단위를 한국식으로 (AI 없이 규칙으로): '2 tsp' -> '2작은술', 'cup of milk' -> '컵 of milk'."""
+    for pat, ko in UNITS:
+        t = re.sub(rf"(?<=[\d½¼¾⅓⅔])\s*(?:{pat})\b\.?", ko, t, flags=re.I)   # 숫자 바로 뒤: 공백 없이 붙임
+        t = re.sub(rf"\b(?:{pat})\b\.?", ko, t, flags=re.I)
+    return t
+
+
+def map_strings(v, fn):
+    """레시피 dict 안의 모든 글에 fn 적용 (url, timestamp는 그대로)."""
+    if isinstance(v, dict):
+        return {k: x if k in ("url", "timestamp") else map_strings(x, fn) for k, x in v.items()}
+    if isinstance(v, list):
+        return [map_strings(x, fn) for x in v]
+    return fn(v) if isinstance(v, str) else v
+
+
+def en_strings(data: dict) -> list:
+    """영어 단어(3글자 이상, KFC 같은 대문자 약어 제외)가 남은 글 목록."""
+    out = []
+    map_strings({k: v for k, v in data.items() if k not in ("url", "thumb")},
+                lambda t: out.append(t) if any(not (w.isupper() and len(w) <= 5) and w.lower() != "kcal" for w in re.findall(r"[A-Za-z]{3,}", t)) else None)
+    return out
+
+
+def ko_fix(data: dict):
+    """영어가 남은 레시피를 AI로 한국어로 바꾼다(재료·섹션·단계의 개수와 순서, timestamp, minutes는 그대로). 실패하면 None."""
+    prompt = ("다음 레시피 JSON에서 영어로 된 모든 부분(title, servings, 재료 이름·분량, 섹션 제목, 단계, 팁)을 자연스러운 한국어로 바꿔라. "
+              "이미 한국어인 부분은 그대로 두고, 재료·섹션·단계의 개수와 순서는 바꾸지 마라. 단위는 큰술·작은술·컵·개·g·ml처럼 한국식으로 쓰고, "
+              "외국 음식 이름은 한국에서 통용되는 표기나 한글 음역을 써라. KFC 같은 브랜드 약어는 그대로 둬도 된다.\n\n"
+              + json.dumps({k: v for k, v in data.items() if k in Recipe.model_fields}, ensure_ascii=False))
+    shape = lambda d: (len(d["ingredients"]), [len(s["steps"]) for s in d["sections"]])
+    for model in MODELS:
+        try:
+            r = json.loads(client.models.generate_content(model=model, contents=prompt,
+                           config={"response_mime_type": "application/json", "response_schema": Recipe}).text)
+        except (genai.errors.APIError, ValueError) as e:
+            print("ko_fix failed:", model, getattr(e, "code", e), flush=True)
+            continue
+        if shape(r) != shape(data):  # 구조가 달라지면(내용이 빠지거나 늘면) 버리고 다음 모델로
+            print("ko_fix shape mismatch:", model, flush=True)
+            continue
+        prefer(model)
+        for s_old, s_new in zip(data["sections"], r["sections"]):   # 시점 정보는 원본 그대로
+            for a, b in zip(s_old["steps"], s_new["steps"]):
+                b["timestamp"] = a["timestamp"]
+        return {**data, **r, "minutes": data.get("minutes", r["minutes"])}
+    return None
 
 
 def ko_title(data: dict):
@@ -459,7 +514,7 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
       data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
 
 
-for col in ("thumb", "ings", "author", "author_url"):
+for col in ("thumb", "ings", "author", "author_url", "ko_ok"):
     try:
         db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
     except Exception:
@@ -510,12 +565,15 @@ def work(job_id: str, url: str, folder_id):
     try:
         threading.Thread(target=preview_title, args=(job_id, url), daemon=True).start()
         data, thumb, (author, author_url) = make_recipe(url)
+        data = map_strings(data, ko_units)                      # 1) 영어 단위는 규칙으로 바로 고친다
+        if en_strings(data) and data["title"].strip() != "레시피 아님":
+            data = map_strings(ko_fix(data) or data, ko_units)  # 2) 영어가 남으면 AI로 한국어로 다시 쓴다
         if needs_ko(data["title"]) and data["title"].strip() != "레시피 아님":
-            data["title"] = ko_title(data) or data["title"]  # 프롬프트를 어기고 영어 제목이 나왔을 때의 안전장치
+            data["title"] = ko_title(data) or data["title"]     # 3) 제목은 따로 한 번 더
         if data["title"].strip() == "레시피 아님":  # 프롬프트가 요리와 무관한 콘텐츠에 쓰라고 한 표식 — 저장하지 않는다
             raise HTTPException(422, "요리 레시피가 아닌 콘텐츠로 보여 저장하지 않았습니다")
         data["url"] = url
-        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url, ko_ok) VALUES (?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT (url) DO NOTHING",
            (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url))
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
     except HTTPException as e:
@@ -645,18 +703,33 @@ def icon():
     return FileResponse(HERE / "icon.png")
 
 
+def fix_korean():
+    """저장된 레시피를 한국어로 점검한다. 영어 단위는 규칙으로(AI 없이), 그래도 영어가 남은 것만 AI로(한 번에 최대 10개).
+    끝낸 레시피는 ko_ok=1로 표시해서 서버가 다시 시작돼도 AI를 다시 부르지 않는다."""
+    ai = 0
+    for rid, raw in db("SELECT id, data FROM recipes WHERE ko_ok IS NULL"):
+        old = json.loads(raw)
+        data = map_strings(old, ko_units)
+        if en_strings(data) or needs_ko(data["title"]):
+            if ai >= 10:
+                continue  # 이번 시작에서는 여기까지, 나머지는 다음 시작 때
+            ai += 1
+            fixed = ko_fix(data) if en_strings(data) else data
+            if fixed is None:
+                continue  # AI 실패(한도 등): 표시하지 않고 다음 시작 때 재시도
+            data = map_strings(fixed, ko_units)
+            if needs_ko(data["title"]):
+                data["title"] = ko_title(data) or data["title"]
+        if data != old:
+            print(f"korean fixed: {old['title']!r} -> {data['title']!r}", flush=True)
+        db("UPDATE recipes SET title = ?, data = ?, ings = ?, ko_ok = 1 WHERE id = ?",
+           (data["title"], json.dumps(data, ensure_ascii=False), ings_of(data), rid))
+
+
 def backfill():
     """썸네일/게시자가 비어 있는 기존 레시피를 서버 시작 때 채운다 (한 번에 최대 20개, 못 구하면 다음 시작 때 재시도).
     ponytail: 영구히 못 구하는 항목이 20개 넘게 쌓이면 뒤쪽이 밀린다 — 그때는 실패 표시 컬럼 추가."""
-    fixed = 0
-    for rid, title in db("SELECT id, title FROM recipes"):  # 한국어가 아닌 제목은 한국어로 고친다 (한 번에 최대 20개)
-        if fixed < 20 and needs_ko(title):
-            data = json.loads(db("SELECT data FROM recipes WHERE id = ?", (rid,))[0][0])
-            if new := ko_title(data):
-                data["title"] = new
-                db("UPDATE recipes SET title = ?, data = ? WHERE id = ?", (new, json.dumps(data, ensure_ascii=False), rid))
-                print(f"title fixed: {title!r} -> {new!r}", flush=True)
-            fixed += 1
+    fix_korean()
     for rid, url, thumb, author, author_url in db("SELECT id, url, thumb, author, author_url FROM recipes WHERE thumb IS NULL OR author IS NULL OR author_url IS NULL ORDER BY created DESC LIMIT 20"):
         if thumb is None:
             with tempfile.TemporaryDirectory() as d:
