@@ -33,6 +33,7 @@
   .txt:disabled { opacity:.4; }
   .on { background:var(--fg); color:var(--bg); padding:0 4px; margin-left:-4px; }
   .list > * { display:block; margin-bottom:3px; }
+  .cols2 { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; justify-items:start; }  /* 폴더 목록 2열 */
   input { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:6px 0; outline:none; min-width:0; width:100%; -webkit-appearance:none; appearance:none; }
   input::placeholder { color:var(--dim); }
   select { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:0 14px 0 0; appearance:none; -webkit-appearance:none; max-width:100%;
@@ -139,7 +140,7 @@ function renderList() {
   const inFolder = cur.length > 4;
   $('main').innerHTML = `
     <div class="r c2"><div class="dim">폴더</div>
-      <div class="list">${opt('all', `전체 ${lib.recipes.length}`)}${opt('none', '분류 안 됨')}${lib.folders.map(f => opt(f.id, f.name)).join('')}
+      <div class="list cols2">${opt('all', `전체 ${lib.recipes.length}`)}${opt('none', '분류 안 됨')}${lib.folders.map(f => opt(f.id, f.name)).join('')}
         <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
     ${inFolder && fname(cur) ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
