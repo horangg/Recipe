@@ -185,31 +185,33 @@ def instagram_cover(url: str, d: str):
 
 
 def instagram_author(url: str):
-    """게시자 아이디(@username). 임베드 페이지의 프로필 링크에서 읽는다 — 공동 게시물이면 첫 번째 게시자."""
+    """(@아이디, 프로필 주소). 임베드 페이지의 프로필 링크에서 읽는다 — 공동 게시물이면 첫 번째 게시자."""
     try:
         page = embed_page(url)
         m = re.search(r"user\?username=([\w.]+)", page)
         name = m[1] if m else embed_field(page, "username")
-        return "@" + name if name else None
+        return ("@" + name, f"https://www.instagram.com/{name}/") if name else (None, None)
     except Exception as e:
         print("instagram_author failed:", e, flush=True)
-        return None
+        return None, None
 
 
 def youtube_author(url: str):
-    """채널 이름 (oEmbed, 키 불필요)."""
+    """(채널 이름, 채널 주소) — oEmbed, 키 불필요."""
     try:
         with http_get("https://www.youtube.com/oembed?format=json&url=" + urllib.parse.quote(url, safe="")) as r:
-            return json.load(r).get("author_name")
+            d = json.load(r)
+        return d.get("author_name"), d.get("author_url")
     except Exception as e:
         print("youtube_author failed:", e, flush=True)
-        return None
+        return None, None
 
 
 def author_for(url: str):
+    """(이름, 프로필 주소) — 못 구하면 (None, None)"""
     if re.match(r"https?://(www\.|m\.)?youtube\.com/", url):
         return youtube_author(url)
-    return instagram_author(url) if "instagram.com" in url else None
+    return instagram_author(url) if "instagram.com" in url else (None, None)
 
 
 def thumb_for(url: str, d: str):
@@ -220,7 +222,7 @@ def thumb_for(url: str, d: str):
 
 
 def make_recipe(url: str):
-    """(레시피 dict, 썸네일 data URI 또는 None, 게시자 또는 None)"""
+    """(레시피 dict, 썸네일 data URI 또는 None, (게시자 이름, 프로필 주소))"""
     with tempfile.TemporaryDirectory() as d:
         if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
             # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
@@ -293,7 +295,7 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
       data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
 
 
-for col in ("thumb", "ings", "author"):
+for col in ("thumb", "ings", "author", "author_url"):
     try:
         db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
     except Exception:
@@ -331,16 +333,16 @@ def check(token):
 
 
 def by_url(url):
-    r = db("SELECT id, data, folder_id, thumb, author FROM recipes WHERE url = ?", (url,))
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4]} if r else None
+    r = db("SELECT id, data, folder_id, thumb, author, author_url FROM recipes WHERE url = ?", (url,))
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4], "author_url": r[0][5]} if r else None
 
 
 def work(job_id: str, url: str, folder_id):
     try:
-        data, thumb, author = make_recipe(url)
+        data, thumb, (author, author_url) = make_recipe(url)
         data["url"] = url
-        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
-           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author))
+        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url))
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
     except HTTPException as e:
         jobs[job_id].update(status="error", error=e.detail)
@@ -391,10 +393,10 @@ def library(x_token: str | None = Header(None)):
 @app.get("/api/recipes/{rid}")
 def get_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)
-    r = db("SELECT id, data, folder_id, thumb, author FROM recipes WHERE id = ?", (rid,))
+    r = db("SELECT id, data, folder_id, thumb, author, author_url FROM recipes WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "레시피를 찾을 수 없습니다")
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4]}
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4], "author_url": r[0][5]}
 
 
 @app.patch("/api/recipes/{rid}")
@@ -472,14 +474,16 @@ def icon():
 def backfill():
     """썸네일/게시자가 비어 있는 기존 레시피를 서버 시작 때 채운다 (한 번에 최대 20개, 못 구하면 다음 시작 때 재시도).
     ponytail: 영구히 못 구하는 항목이 20개 넘게 쌓이면 뒤쪽이 밀린다 — 그때는 실패 표시 컬럼 추가."""
-    for rid, url, thumb, author in db("SELECT id, url, thumb, author FROM recipes WHERE thumb IS NULL OR author IS NULL ORDER BY created DESC LIMIT 20"):
+    for rid, url, thumb, author, author_url in db("SELECT id, url, thumb, author, author_url FROM recipes WHERE thumb IS NULL OR author IS NULL OR author_url IS NULL ORDER BY created DESC LIMIT 20"):
         if thumb is None:
             with tempfile.TemporaryDirectory() as d:
                 thumb = thumb_for(url, d)
             if thumb:
                 db("UPDATE recipes SET thumb = ? WHERE id = ?", (thumb, rid))
-        if author is None and (author := author_for(url)):
-            db("UPDATE recipes SET author = ? WHERE id = ?", (author, rid))
+        if author is None or author_url is None:
+            name, link = author_for(url)
+            if name and link:
+                db("UPDATE recipes SET author = ?, author_url = ? WHERE id = ?", (name, link, rid))
 
 
 threading.Thread(target=backfill, daemon=True).start()
