@@ -1,11 +1,11 @@
-import base64, json, os, re, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
+import base64, hashlib, json, os, re, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -437,9 +437,26 @@ def delete_folder(fid: str, x_token: str | None = Header(None)):
     return {}
 
 
+def _build() -> str:  # 화면 파일 내용의 해시. 배포로 파일이 바뀌면 값이 달라진다
+    h = hashlib.sha1()
+    for n in ("index.html", "sw.js", "manifest.json", "icon.png"):
+        h.update((HERE / n).read_bytes())
+    return h.hexdigest()[:10]
+
+
+BUILD = _build()
+
+
 @app.get("/")
 def index():
-    return FileResponse(HERE / "index.html")
+    # 화면에 자기 버전을 심어 보낸다. 화면이 /version과 비교해 낡았으면 스스로 새로고침한다.
+    html = (HERE / "index.html").read_text(encoding="utf8").replace("__BUILD__", BUILD)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/version")
+def version():
+    return {"v": BUILD}
 
 
 @app.get("/manifest.json")

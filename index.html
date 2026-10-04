@@ -218,6 +218,21 @@ if (qs.has('token') || qs.has('url')) history.replaceState(null, '', location.pa
 route();
 if (qs.get('url')) go(qs.get('url'));
 
+// ---- 자동 업데이트: 서버의 버전과 내 버전이 다르면 스스로 새로고침 (홈 화면 앱은 저절로 새로고침되지 않는다)
+const BUILD = '__BUILD__';  // 서버가 / 를 보낼 때 실제 버전으로 바꿔 넣는다
+async function checkUpdate() {
+  try {
+    const v = (await (await fetch('/version', { cache: 'no-store' })).json()).v;
+    if (v === BUILD || BUILD.startsWith('__')) return;         // 같은 버전이거나 파일을 직접 연 경우
+    if (!$('sheet').hidden || $('fab').disabled) return;        // 링크 입력/추출 중에는 방해하지 않는다 (다음 확인 때 다시 시도)
+    if (store.get('reloaded') === v) return;                    // 같은 버전으로 두 번 새로고침하지 않는다 (낡은 캐시로 무한 반복 방지)
+    store.set('reloaded', v); location.reload();
+  } catch {}
+}
+addEventListener('visibilitychange', () => document.visibilityState === 'visible' && checkUpdate());  // 앱으로 돌아올 때
+addEventListener('pageshow', checkUpdate);                                                           // 열릴 때
+setInterval(checkUpdate, 5 * 60 * 1000);                                                             // 켜 둔 채로 있을 때
+
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});  // 앱 껍데기 캐시 (첫 화면 즉시 표시)
 </script>
 </body>
