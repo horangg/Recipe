@@ -5,39 +5,44 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="레시피">
-<meta name="theme-color" content="#ff6b35">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#2b35ff" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon.png">
 <title>레시피 추출</title>
 <style>
-  :root { --bg:#fff; --fg:#1c1c1e; --muted:#6e6e73; --line:#e5e5ea; --chip:#f2f2f7; --accent:#ff6b35; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#000; --fg:#f2f2f7; --muted:#98989d; --line:#2c2c2e; --chip:#1c1c1e; } }
-  body { font:16px/1.5 -apple-system,sans-serif; background:var(--bg); color:var(--fg); margin:0 auto; padding:16px; padding-bottom:calc(16px + env(safe-area-inset-bottom)); max-width:640px; }
-  form { display:flex; gap:8px; }
-  input, select { font:inherit; padding:12px; border:1px solid var(--line); border-radius:10px; background:transparent; color:inherit; min-width:0; }
-  input { flex:1; }
-  button { font:inherit; padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:#fff; }
-  button:disabled { opacity:.5; }
-  button.link { background:none; color:var(--accent); padding:4px 8px; }
-  a { color:var(--accent); }
-  h1 { font-size:22px; margin:20px 0 4px; } h2 { font-size:18px; margin:24px 0 8px; }
-  .meta, .muted { color:var(--muted); font-size:14px; }
-  ul { padding:0; list-style:none; margin:0; } li { padding:8px 0; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; }
-  ol { padding-left:20px; } ol li { display:list-item; border:0; padding:6px 0; }
-  .ts { color:var(--accent); font-variant-numeric:tabular-nums; text-decoration:none; }
-  .err { color:#d70015; }
-  .chips { display:flex; gap:8px; overflow-x:auto; padding:12px 0; margin:0 -16px; padding-left:16px; padding-right:16px; }
-  .chip { flex:none; padding:6px 14px; border-radius:999px; background:var(--chip); color:var(--fg); border:0; font-size:15px; }
-  .chip.on { background:var(--accent); color:#fff; }
-  .row { display:flex; justify-content:space-between; align-items:center; gap:8px; }
-  .item { display:block; text-decoration:none; color:var(--fg); padding:12px 0; border-bottom:1px solid var(--line); }
-  .banner { background:var(--chip); border-radius:10px; padding:10px 12px; margin-top:12px; font-size:14px; }
+  :root { --bg:#fff; --fg:#2b35ff; --dim:rgba(43,53,255,.55); }
+  @media (prefers-color-scheme: dark) { :root { --bg:#2b35ff; --fg:#fff; --dim:rgba(255,255,255,.65); } }
+  * { box-sizing:border-box; }
+  html { background:var(--bg); }
+  body { margin:0 auto; max-width:640px; padding:20px 20px calc(32px + env(safe-area-inset-bottom)); background:var(--bg); color:var(--fg);
+         font:400 18px/1.2 "Helvetica Neue", Helvetica, Arial, "Apple SD Gothic Neo", sans-serif; letter-spacing:-.01em; -webkit-font-smoothing:antialiased; word-break:keep-all; overflow-wrap:break-word; }
+  a { color:inherit; }
+  b { font-weight:600; }
+  .cap { font-size:11px; line-height:1.25; }
+  .dim { color:var(--dim); }
+  .r { border-top:1px solid var(--fg); padding:12px 0; }
+  .c2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .c3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
+  .ra { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:baseline; }
+  .big { font-size:20px; line-height:1.18; }
+  .title { font-size:28px; line-height:1.1; font-weight:500; letter-spacing:-.02em; }
+  .txt { all:unset; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
+  .txt:disabled { opacity:.4; }
+  .on { background:var(--fg); color:var(--bg); padding:0 4px; margin-left:-4px; }
+  .list > * { display:block; margin-bottom:3px; }
+  form { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:end; padding-bottom:12px; }
+  input { font:inherit; font-size:20px; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:6px 0; outline:none; min-width:0; }
+  input::placeholder { color:var(--dim); }
+  select { font:inherit; font-size:18px; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:0 14px 0 0; appearance:none; -webkit-appearance:none; max-width:100%;
+           background-image:linear-gradient(45deg,transparent 50%,var(--fg) 50%),linear-gradient(135deg,var(--fg) 50%,transparent 50%); background-size:4px 4px; background-position:calc(100% - 5px) 55%,calc(100% - 1px) 55%; background-repeat:no-repeat; }
+  p { margin:0 0 14px; }
 </style>
 </head>
 <body>
 <form id="f">
-  <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="유튜브/인스타 영상 링크 붙여넣기" required>
-  <button id="b">추출</button>
+  <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 붙여넣기" required>
+  <button class="txt" id="b">추출 →</button>
 </form>
 <div id="jobs"></div>
 <div id="main"></div>
@@ -70,28 +75,29 @@ async function loadLib() { lib = await api('/api/library'); renderJobs(); }
 
 function renderJobs() {
   $('jobs').innerHTML = lib.jobs.map(j => j.status === 'error'
-    ? `<div class="banner err">실패: ${esc(j.error)} <button class="link" onclick="dismiss('${j.id}')">닫기</button></div>`
-    : `<div class="banner">분석 중… <span class="muted">${esc(j.url)}</span></div>`).join('');
+    ? `<div class="r ra"><div><b>실패</b> ${esc(j.error)}</div><button class="txt cap" onclick="dismiss('${j.id}')">닫기</button></div>`
+    : `<div class="r c2"><div>분석 중…</div><div class="cap dim">${esc(j.url)}</div></div>`).join('');
 }
 async function dismiss(id) { await api('/api/job/' + id, 'DELETE'); await loadLib(); }
 
 // ---- 목록 화면
 async function showList() {
-  clearInterval(timer);
-  try { await loadLib(); } catch (e) { $('main').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  clearTimeout(timer);
+  try { await loadLib(); } catch (e) { $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)}</div>`; return; }
   if (cur !== 'all' && cur !== 'none' && !lib.folders.some(f => f.id === cur)) cur = 'all';
   const fname = id => (lib.folders.find(f => f.id === id) || {}).name;
   const shown = lib.recipes.filter(r => cur === 'all' || (cur === 'none' ? !r.folder_id : r.folder_id === cur));
-  const chip = (id, label) => `<button class="chip ${cur === id ? 'on' : ''}" onclick="setCur('${id}')">${esc(label)}</button>`;
+  const opt = (id, label) => `<button class="txt ${cur === id ? 'on' : ''}" style="text-decoration:none" onclick="setCur('${id}')">${esc(label)}</button>`;
+  const inFolder = cur.length > 4;
   $('main').innerHTML = `
-    <div class="chips">${chip('all', `전체 ${lib.recipes.length}`)}${chip('none', '분류 안 됨')}
-      ${lib.folders.map(f => chip(f.id, f.name)).join('')}
-      <button class="chip" onclick="addFolder()">+ 폴더</button></div>
-    ${cur.length > 4 ? `<div class="row muted"><span>폴더: ${esc(fname(cur))}</span>
-      <span><button class="link" onclick="renameFolder()">이름 변경</button><button class="link" onclick="delFolder()">삭제</button></span></div>` : ''}
-    ${shown.length ? shown.map(r => `<a class="item" href="#r/${r.id}"><div>${esc(r.title)}</div>
-      <div class="muted">${new Date(r.created).toLocaleDateString('ko-KR')}${cur === 'all' && r.folder_id ? ' · ' + esc(fname(r.folder_id)) : ''}</div></a>`).join('')
-      : '<p class="muted">저장된 레시피가 없습니다. 위에 링크를 붙여넣어 보세요.</p>'}`;
+    <div class="r c2"><div class="cap">폴더</div>
+      <div class="list">${opt('all', `전체 ${lib.recipes.length}`)}${opt('none', '분류 안 됨')}${lib.folders.map(f => opt(f.id, f.name)).join('')}
+        <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
+    ${inFolder ? `<div class="r ra cap"><span class="dim">${esc(fname(cur))}</span>
+      <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
+    ${shown.length ? shown.map(r => `<a class="r ra" style="text-decoration:none" href="#r/${r.id}"><span class="big">${esc(r.title)}</span>
+      <span class="cap dim" style="text-align:right">${new Date(r.created).toLocaleDateString('ko-KR')}${cur === 'all' && r.folder_id ? '<br>' + esc(fname(r.folder_id)) : ''}</span></a>`).join('')
+      : '<div class="r cap dim">저장된 레시피가 없습니다. 위에 링크를 붙여넣어 보세요.</div>'}`;
   if (lib.jobs.some(j => j.status === 'pending')) timer = setTimeout(() => !location.hash && showList(), 4000);
 }
 function setCur(id) { cur = id; store.set('cur', id); showList(); }
@@ -106,37 +112,39 @@ async function delFolder() {
 }
 
 // ---- 레시피 화면
-const ing = i => `<li><span>${esc(i.name)}</span><span class="muted">${esc(i.amount)}</span></li>`;
 function tsLink(url, ts) {
   const m = /^(\d+):(\d+)$/.exec(ts || ''); if (!m) return '';
   const sec = +m[1] * 60 + +m[2];
   const href = /youtu/.test(url) ? url + (url.includes('?') ? '&' : '?') + 't=' + sec : url;
-  return `<a class="ts" href="${esc(href)}" target="_blank">${ts}</a> `;
+  return `<a class="cap" href="${esc(href)}" target="_blank" style="margin-right:6px">${ts}</a>`;
 }
 async function showRecipe(id) {
-  clearInterval(timer); clearTimeout(timer);
-  $('main').innerHTML = '<p class="muted">불러오는 중…</p>';
+  clearTimeout(timer);
+  $('main').innerHTML = '<div class="r cap dim">불러오는 중…</div>';
   try {
     const [r] = await Promise.all([api('/api/recipes/' + id), lib.folders.length ? 0 : loadLib()]);
     $('main').innerHTML = `
-      <div class="row" style="margin-top:12px"><a href="#">← 목록</a>
-        <span><select onchange="move('${r.id}', this.value)"><option value="">분류 안 됨</option>
-          ${lib.folders.map(f => `<option value="${f.id}" ${f.id === r.folder_id ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>
-        <button class="link" onclick="delRecipe('${r.id}')">삭제</button></span></div>
-      <h1>${esc(r.title)}</h1>
-      <div class="meta">${esc(r.servings)} · 약 ${r.minutes}분 · <a href="${esc(r.url)}" target="_blank">원본 영상</a></div>
-      <h2>재료</h2><ul>${r.ingredients.map(ing).join('')}</ul>
-      ${r.sections.map(s => `<h2>${esc(s.title)}</h2><ol>${s.steps.map(st =>
-        `<li>${tsLink(r.url, st.timestamp)}${esc(st.text)}${st.ingredients.length ? `<div class="muted">${st.ingredients.map(i => esc(i.name + ' ' + i.amount)).join(', ')}</div>` : ''}</li>`).join('')}</ol>`).join('')}
-      ${r.tips.length ? `<h2>팁</h2><ul>${r.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}`;
-  } catch (e) { $('main').innerHTML = `<p class="err">${esc(e.message)}</p><a href="#">← 목록</a>`; }
+      <div class="r ra cap"><a href="#">← 목록</a><button class="txt" onclick="delRecipe('${r.id}')">삭제</button></div>
+      <div class="title" style="padding:4px 0 18px">${esc(r.title)}</div>
+      <div class="r c3"><div><div class="cap dim">분량</div><div>${esc(r.servings)}</div></div>
+        <div><div class="cap dim">시간</div><div>${r.minutes}분</div></div>
+        <div><div class="cap dim">원본</div><a href="${esc(r.url)}" target="_blank">영상 ↗</a></div></div>
+      <div class="r"><div class="cap dim">폴더</div>
+        <select onchange="move('${r.id}', this.value)"><option value="">분류 안 됨</option>
+          ${lib.folders.map(f => `<option value="${f.id}" ${f.id === r.folder_id ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select></div>
+      <div class="r c2"><div class="cap">재료</div>
+        <div class="list">${r.ingredients.map(i => `<span>${esc(i.name)} <span class="dim">${esc(i.amount)}</span></span>`).join('')}</div></div>
+      ${r.sections.map(s => `<div class="r"><div class="cap" style="margin-bottom:10px">${esc(s.title)}</div>${s.steps.map(st =>
+        `<p class="big">${tsLink(r.url, st.timestamp)}${esc(st.text)}${st.ingredients.length ? `<br><span class="cap dim">${st.ingredients.map(i => esc(i.name + ' ' + i.amount)).join(' · ')}</span>` : ''}</p>`).join('')}</div>`).join('')}
+      ${r.tips.length ? `<div class="r c2"><div class="cap">팁</div><div class="list">${r.tips.map(t => `<span>${esc(t)}</span>`).join('')}</div></div>` : ''}`;
+  } catch (e) { $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)} <a href="#">← 목록</a></div>`; }
 }
 async function move(id, folder_id) { await api('/api/recipes/' + id, 'PATCH', { folder_id }); lib.folders.length = 0; await loadLib(); }
 async function delRecipe(id) { if (confirm('이 레시피를 삭제할까요?')) { await api('/api/recipes/' + id, 'DELETE'); location.hash = ''; } }
 
 // ---- 추출
 async function go(url) {
-  $('b').disabled = true; $('jobs').innerHTML = '<div class="banner">분석 중… (30초~2분, 화면을 켜 두세요)</div>';
+  $('b').disabled = true; $('jobs').innerHTML = '<div class="r c2"><div>분석 중…</div><div class="cap dim">30초~2분, 화면을 켜 두세요</div></div>';
   try {
     let d = await api('/api/recipe', 'POST', { url, folder_id: cur.length > 4 ? cur : null });
     const id = d.id;  // job 응답에는 id가 없으므로 따로 보관
@@ -145,8 +153,8 @@ async function go(url) {
       d = await api('/api/job/' + id);
     }
     if (d.status === 'error') throw new Error(d.error);
-    $('u').value = ''; lib.folders.length = 0; location.hash = '#r/' + d.recipe.id; route();
-  } catch (e) { $('jobs').innerHTML = `<div class="banner err">${esc(e.message)}</div>`; }
+    $('u').value = ''; $('jobs').innerHTML = ''; lib.folders.length = 0; location.hash = '#r/' + d.recipe.id; route();
+  } catch (e) { $('jobs').innerHTML = `<div class="r"><b>실패</b> ${esc(e.message)}</div>`; }
   $('b').disabled = false;
 }
 
