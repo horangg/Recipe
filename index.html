@@ -33,6 +33,7 @@
   .txt:disabled { opacity:.4; }
   .on { background:var(--fg); color:var(--bg); padding:0 4px; margin-left:-4px; }
   .list > * { display:block; margin-bottom:3px; }
+  .clip { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }  /* 한 줄로 자르고 … 처리 */
   .cols2 { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; justify-items:start; }  /* 폴더 목록 2열 */
   input { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:6px 0; outline:none; min-width:0; width:100%; -webkit-appearance:none; appearance:none; }
   input::placeholder { color:var(--dim); }
@@ -105,7 +106,7 @@ async function loadLib() {
 function renderJobs() {
   $('jobs').innerHTML = lib.jobs.map(j => j.status === 'error'
     ? `<div class="r ra"><div><b>실패</b> ${esc(j.error)}</div><button class="txt" onclick="dismiss('${j.id}')">닫기</button></div>`
-    : `<div class="r c2"><div>분석 중…</div><div class="dim">${esc(j.url)}</div></div>`).join('');
+    : `<div class="r c2"><div>분석 중…</div><div class="dim clip">${esc(j.title || '')}</div></div>`).join('');
 }
 async function dismiss(id) { await api('/api/job/' + id, 'DELETE'); await loadLib(); }
 
@@ -189,13 +190,15 @@ function openSheet() { $('sheet').hidden = false; $('u').focus(); }
 function closeSheet() { $('sheet').hidden = true; }
 
 async function go(url) {
-  $('fab').disabled = true; $('jobs').innerHTML = '<div class="r c2"><div>분석 중…</div><div class="dim">30초~2분, 화면을 켜 두세요</div></div>';
+  const banner = title => $('jobs').innerHTML = `<div class="r c2"><div>분석 중…</div><div class="dim clip">${esc(title || '30초~2분 소요')}</div></div>`;  // 링크 대신 요리 제목
+  $('fab').disabled = true; banner();
   try {
     let d = await api('/api/recipe', 'POST', { url, folder_id: cur.length > 4 ? cur : null });
     const id = d.id;  // job 응답에는 id가 없으므로 따로 보관
     while (d.status === 'pending') {  // 짧은 요청을 반복해 Safari/프록시 타임아웃을 피함
       await new Promise(r => setTimeout(r, 3000));
       d = await api('/api/job/' + id);
+      if (d.status === 'pending') banner(d.title);
     }
     if (d.status === 'error') throw new Error(d.error);
     $('u').value = ''; $('jobs').innerHTML = ''; await loadLib().catch(() => {}); location.hash = '#r/' + d.recipe.id; route();

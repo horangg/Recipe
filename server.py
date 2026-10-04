@@ -76,6 +76,7 @@ PROMPT = """첨부된 요리 콘텐츠(영상, 사진 게시물, 또는 글)를 
 - 아래 캡션/본문에 재료·분량이 있으면 가장 우선 신뢰하고, 영상·사진과 다르면 영상·사진 기준으로 보정.
 - 재료는 같은 것끼리 합치고 분량은 단위를 통일(g, ml, 큰술 등). 분량을 알 수 없으면 "적당량".
 - 조리 순서는 섹션으로 나누고, 각 단계에 그 단계에 쓰는 재료를 붙여라. timestamp는 영상일 때만 해당 시점(mm:ss)을 쓰고, 사진·글이면 빈 문자열.
+- title과 모든 글은 한국어로 쓴다. title은 자연스러운 한국어 요리 이름으로 쓰고(외국 음식은 한국에서 통용되는 표기나 한글 음역), 영어 제목을 그대로 쓰지 않는다.
 - 콘텐츠에 없는 내용은 지어내지 마라. 요리 레시피가 아니면 title에 "레시피 아님"이라고 쓰고 나머지는 비워라.
 
 캡션/본문:
@@ -334,6 +335,74 @@ def make_recipe(url: str):
     return json.loads(r.text), thumb, author_for(url)
 
 
+def prefer(model: str):
+    """성공한 모델을 맨 앞으로: 한도(429)가 찬 모델을 요청마다 다시 시도하느라 몇 초씩 낭비하지 않는다."""
+    if model in MODELS:
+        MODELS.insert(0, MODELS.pop(MODELS.index(model)))
+
+
+def needs_ko(title: str) -> bool:
+    """한글이 없거나 영어 글자가 한글보다 많으면 한국어 제목이 아니라고 본다."""
+    return not re.search(r"[가-힣]", title) or len(re.findall(r"[A-Za-z]", title)) > len(re.findall(r"[가-힣]", title))
+
+
+def ask(prompt: str):
+    """짧은 텍스트 질문 하나. 모델이 막히면 다음 모델로, 전부 실패하면 None."""
+    for model in MODELS:
+        try:
+            text = (client.models.generate_content(model=model, contents=prompt).text or "").strip()
+            prefer(model)
+            return text
+        except genai.errors.APIError as e:
+            print("ask failed:", model, e.code, flush=True)
+    return None
+
+
+def one_line(t):
+    lines = [l.strip().strip("\"'“”‘’「」") for l in (t or "").splitlines() if l.strip()]
+    return lines[0] if lines else ""
+
+
+def ko_title(data: dict):
+    """레시피 내용을 근거로 한국어 요리 이름을 만든다. 못 만들면 None."""
+    ings = ", ".join(i["name"] for i in data.get("ingredients", [])[:8])
+    first = next((st["text"] for s in data.get("sections", []) for st in s["steps"]), "")
+    t = one_line(ask("다음 레시피의 제목을 자연스러운 한국어 요리 이름으로 바꿔라. 외국 음식은 한국에서 통용되는 표기나 한글 음역을 쓰고, "
+                     f"영어를 그대로 두지 마라. 설명 없이 제목 한 줄만 출력해라.\n기존 제목: {data['title']}\n재료: {ings}\n첫 단계: {first[:120]}"))
+    return t if t and len(t) <= 60 and not needs_ko(t) else None
+
+
+def raw_title(url: str):
+    """(화면에 먼저 보일 짧은 제목, AI에게 요리 이름을 물을 때 쓸 더 긴 문맥). 못 구하면 (None, None)."""
+    try:
+        if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
+            with http_get("https://www.youtube.com/oembed?format=json&url=" + urllib.parse.quote(url, safe="")) as r:
+                t = json.load(r).get("title")
+            return t, t
+        if "instagram.com" in url:
+            cap = embed_caption(embed_page(url))
+            lines = [l.strip(" .\u00a0") for l in cap.splitlines() if l.strip(" .\u00a0")]
+            return (lines[0] if lines else None), cap  # 요리 이름은 첫 줄이 아니라 뒤쪽 줄에 있는 경우가 많다
+        with http_get(url) as r:
+            m = re.search(r"<title[^>]*>(.*?)</title>", r.read(300_000).decode(r.headers.get_content_charset() or "utf-8", "ignore"), re.S | re.I)
+        return (m[1].strip(), m[1].strip()) if m else (None, None)
+    except Exception:
+        return None, None
+
+
+def preview_title(job_id: str, url: str):
+    """분석 중 화면에 보일 요리 제목: 원본 제목을 먼저 보여주고, 곧 AI가 '요리 이름만' 뽑아 바꾼다. 실패해도 분석에는 영향 없음."""
+    short, context = raw_title(url)
+    raw = re.sub(r"\s+", " ", short or "").strip()
+    if not raw or job_id not in jobs:
+        return
+    jobs[job_id]["title"] = raw[:60]
+    dish = one_line(ask(f"다음은 요리 콘텐츠의 제목 또는 캡션이다. 만드는 요리의 이름만 자연스러운 한국어로 한 줄로 답해라 "
+                        f"(수식어·이모지·해시태그 제외). 요리가 무엇인지 알 수 없으면 '알 수 없음'이라고만 답해라.\n\n{(context or raw)[:400]}"))
+    if dish and dish != "알 수 없음" and len(dish) <= 40 and job_id in jobs:
+        jobs[job_id]["title"] = dish
+
+
 def generate(f, caption):
     """f: 영상 파일 / 이미지 Part 목록 / None(글만)"""
     media = [] if f is None else f if isinstance(f, list) else [f]
@@ -341,11 +410,13 @@ def generate(f, caption):
     for attempt in range(3):
         for model in MODELS:
             try:
-                return client.models.generate_content(
+                r = client.models.generate_content(
                     model=model,
                     contents=[*media, PROMPT.format(caption=caption)],
                     config={"response_mime_type": "application/json", "response_schema": Recipe},
                 )
+                prefer(model)
+                return r
             except genai.errors.APIError as e:
                 err = e
         time.sleep(3 * (attempt + 1))
@@ -437,7 +508,10 @@ def by_url(url):
 
 def work(job_id: str, url: str, folder_id):
     try:
+        threading.Thread(target=preview_title, args=(job_id, url), daemon=True).start()
         data, thumb, (author, author_url) = make_recipe(url)
+        if needs_ko(data["title"]) and data["title"].strip() != "레시피 아님":
+            data["title"] = ko_title(data) or data["title"]  # 프롬프트를 어기고 영어 제목이 나왔을 때의 안전장치
         if data["title"].strip() == "레시피 아님":  # 프롬프트가 요리와 무관한 콘텐츠에 쓰라고 한 표식 — 저장하지 않는다
             raise HTTPException(422, "요리 레시피가 아닌 콘텐츠로 보여 저장하지 않았습니다")
         data["url"] = url
@@ -485,7 +559,7 @@ def library(x_token: str | None = Header(None)):
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
         "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": r[3], "ings": r[4], "author": r[5]}
                     for r in db("SELECT id, title, folder_id, thumb, ings, author FROM recipes ORDER BY created DESC")],
-        "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error") if x in v}}
+        "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error", "title") if x in v}}
                  for k, v in jobs.items() if v["status"] != "done"],
     }
 
@@ -574,6 +648,15 @@ def icon():
 def backfill():
     """썸네일/게시자가 비어 있는 기존 레시피를 서버 시작 때 채운다 (한 번에 최대 20개, 못 구하면 다음 시작 때 재시도).
     ponytail: 영구히 못 구하는 항목이 20개 넘게 쌓이면 뒤쪽이 밀린다 — 그때는 실패 표시 컬럼 추가."""
+    fixed = 0
+    for rid, title in db("SELECT id, title FROM recipes"):  # 한국어가 아닌 제목은 한국어로 고친다 (한 번에 최대 20개)
+        if fixed < 20 and needs_ko(title):
+            data = json.loads(db("SELECT data FROM recipes WHERE id = ?", (rid,))[0][0])
+            if new := ko_title(data):
+                data["title"] = new
+                db("UPDATE recipes SET title = ?, data = ? WHERE id = ?", (new, json.dumps(data, ensure_ascii=False), rid))
+                print(f"title fixed: {title!r} -> {new!r}", flush=True)
+            fixed += 1
     for rid, url, thumb, author, author_url in db("SELECT id, url, thumb, author, author_url FROM recipes WHERE thumb IS NULL OR author IS NULL OR author_url IS NULL ORDER BY created DESC LIMIT 20"):
         if thumb is None:
             with tempfile.TemporaryDirectory() as d:
