@@ -16,13 +16,13 @@
   html { background:var(--bg); }
   /* 글자 크기는 한 가지(18px)만 쓴다. 위계는 색(dim)과 굵기로만 표현 */
   body { margin:0 auto; max-width:640px; padding:20px 20px calc(110px + env(safe-area-inset-bottom)); background:var(--bg); color:var(--fg);
-         font:400 18px/1.3 "Helvetica Neue", Helvetica, Arial, "Apple SD Gothic Neo", sans-serif; letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
+         font:400 18px/1.5 "Helvetica Neue", Helvetica, Arial, "Apple SD Gothic Neo", sans-serif; letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
          word-break:keep-all; overflow-wrap:break-word; }
   a { color:inherit; }
   b, .title { font-weight:600; }
   .dim { color:var(--dim); }
   .r { border-top:1px solid var(--fg); padding:12px 0; }
-  .c2 { display:grid; grid-template-columns:1fr 2fr; gap:16px; }  /* 왼쪽 라벨 영역은 전체의 1/3 */
+  .c2 { display:grid; grid-template-columns:25% 1fr; gap:16px; }  /* 왼쪽 라벨 영역은 전체의 1/4 */
   .c3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
   .ra { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:baseline; }
   .item { display:grid; grid-template-columns:56px 1fr; gap:14px; align-items:center; text-decoration:none; }
