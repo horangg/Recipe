@@ -1,4 +1,4 @@
-import base64, json, os, re, sqlite3, subprocess, tempfile, threading, time, urllib.request, uuid
+import base64, json, os, re, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -184,6 +184,34 @@ def instagram_cover(url: str, d: str):
         return None
 
 
+def instagram_author(url: str):
+    """게시자 아이디(@username). 임베드 페이지의 프로필 링크에서 읽는다 — 공동 게시물이면 첫 번째 게시자."""
+    try:
+        page = embed_page(url)
+        m = re.search(r"user\?username=([\w.]+)", page)
+        name = m[1] if m else embed_field(page, "username")
+        return "@" + name if name else None
+    except Exception as e:
+        print("instagram_author failed:", e, flush=True)
+        return None
+
+
+def youtube_author(url: str):
+    """채널 이름 (oEmbed, 키 불필요)."""
+    try:
+        with http_get("https://www.youtube.com/oembed?format=json&url=" + urllib.parse.quote(url, safe="")) as r:
+            return json.load(r).get("author_name")
+    except Exception as e:
+        print("youtube_author failed:", e, flush=True)
+        return None
+
+
+def author_for(url: str):
+    if re.match(r"https?://(www\.|m\.)?youtube\.com/", url):
+        return youtube_author(url)
+    return instagram_author(url) if "instagram.com" in url else None
+
+
 def thumb_for(url: str, d: str):
     """영상을 받지 않고 만들 수 있는 썸네일 (이미 저장된 레시피에 채워 넣을 때 사용)."""
     if re.match(r"https?://(www\.|m\.)?youtube\.com/", url):
@@ -192,12 +220,12 @@ def thumb_for(url: str, d: str):
 
 
 def make_recipe(url: str):
-    """(레시피 dict, 썸네일 data URI 또는 None)"""
+    """(레시피 dict, 썸네일 data URI 또는 None, 게시자 또는 None)"""
     with tempfile.TemporaryDirectory() as d:
         if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
             # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
             thumb = youtube_thumb(url, d)
-            return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), "").text), thumb
+            return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), "").text), thumb, author_for(url)
         video, caption = fetch(url, d)
         thumb = instagram_cover(url, d) or thumb_from(str(video), d)  # 대표 이미지 우선, 없으면 영상 프레임
         f = client.files.upload(file=str(video))
@@ -210,7 +238,7 @@ def make_recipe(url: str):
             r = generate(f, caption)
         finally:
             client.files.delete(name=f.name)
-    return json.loads(r.text), thumb
+    return json.loads(r.text), thumb, author_for(url)
 
 
 def generate(f, caption):
@@ -265,7 +293,7 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
       data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
 
 
-for col in ("thumb", "ings"):
+for col in ("thumb", "ings", "author"):
     try:
         db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
     except Exception:
@@ -303,16 +331,16 @@ def check(token):
 
 
 def by_url(url):
-    r = db("SELECT id, data, folder_id, thumb FROM recipes WHERE url = ?", (url,))
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3]} if r else None
+    r = db("SELECT id, data, folder_id, thumb, author FROM recipes WHERE url = ?", (url,))
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4]} if r else None
 
 
 def work(job_id: str, url: str, folder_id):
     try:
-        data, thumb = make_recipe(url)
+        data, thumb, author = make_recipe(url)
         data["url"] = url
-        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
-           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data)))
+        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author))
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
     except HTTPException as e:
         jobs[job_id].update(status="error", error=e.detail)
@@ -353,8 +381,8 @@ def library(x_token: str | None = Header(None)):
     check(x_token)
     return {
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
-        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": r[3], "ings": r[4]}
-                    for r in db("SELECT id, title, folder_id, thumb, ings FROM recipes ORDER BY created DESC")],
+        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": r[3], "ings": r[4], "author": r[5]}
+                    for r in db("SELECT id, title, folder_id, thumb, ings, author FROM recipes ORDER BY created DESC")],
         "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error") if x in v}}
                  for k, v in jobs.items() if v["status"] != "done"],
     }
@@ -363,10 +391,10 @@ def library(x_token: str | None = Header(None)):
 @app.get("/api/recipes/{rid}")
 def get_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)
-    r = db("SELECT id, data, folder_id, thumb FROM recipes WHERE id = ?", (rid,))
+    r = db("SELECT id, data, folder_id, thumb, author FROM recipes WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "레시피를 찾을 수 없습니다")
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3]}
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4]}
 
 
 @app.patch("/api/recipes/{rid}")
@@ -424,16 +452,20 @@ def icon():
     return FileResponse(HERE / "icon.png")
 
 
-def backfill_thumbs():
-    """썸네일이 없는 기존 레시피에 서버 시작 때 채워 넣는다 (한 번에 최대 20개, 실패하면 다음 시작 때 재시도)."""
-    for rid, url in db("SELECT id, url FROM recipes WHERE thumb IS NULL LIMIT 20"):
-        with tempfile.TemporaryDirectory() as d:
-            t = thumb_for(url, d)
-        if t:
-            db("UPDATE recipes SET thumb = ? WHERE id = ?", (t, rid))
+def backfill():
+    """썸네일/게시자가 비어 있는 기존 레시피를 서버 시작 때 채운다 (한 번에 최대 20개, 못 구하면 다음 시작 때 재시도).
+    ponytail: 영구히 못 구하는 항목이 20개 넘게 쌓이면 뒤쪽이 밀린다 — 그때는 실패 표시 컬럼 추가."""
+    for rid, url, thumb, author in db("SELECT id, url, thumb, author FROM recipes WHERE thumb IS NULL OR author IS NULL ORDER BY created DESC LIMIT 20"):
+        if thumb is None:
+            with tempfile.TemporaryDirectory() as d:
+                thumb = thumb_for(url, d)
+            if thumb:
+                db("UPDATE recipes SET thumb = ? WHERE id = ?", (thumb, rid))
+        if author is None and (author := author_for(url)):
+            db("UPDATE recipes SET author = ? WHERE id = ?", (author, rid))
 
 
-threading.Thread(target=backfill_thumbs, daemon=True).start()
+threading.Thread(target=backfill, daemon=True).start()
 
 
 @app.get("/health")

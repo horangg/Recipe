@@ -38,6 +38,7 @@
   select { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:0 14px 0 0; appearance:none; -webkit-appearance:none; max-width:100%;
            background-image:linear-gradient(45deg,transparent 50%,var(--fg) 50%),linear-gradient(135deg,var(--fg) 50%,transparent 50%); background-size:4px 4px; background-position:calc(100% - 5px) 55%,calc(100% - 1px) 55%; background-repeat:no-repeat; }
   p { margin:0 0 14px; }
+  .step { display:grid; grid-template-columns:28px 1fr; gap:6px; }
   #status { padding:8px 0 0; }
   #status:empty { display:none; }
   /* 우측 하단 플로팅 추가 버튼 (+ 는 글자가 아니라 선으로 그려 글자 크기 규칙을 지킨다) */
@@ -71,6 +72,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 const store = { get: k => { try { return localStorage[k] || ''; } catch { return ''; } }, set: (k, v) => { try { localStorage[k] = v; } catch {} } };
 const thumb = t => t ? `<img class="th" src="${t}" alt="">` : '<div class="ph"></div>';
 const setStatus = t => { $('status').textContent = t; };
+const subline = parts => { const t = parts.filter(Boolean).join(' · '); return t ? `<br><span class="dim">${esc(t)}</span>` : ''; };
 
 // ---- API (토큰이 없거나 틀리면 한 번 물어봄)
 async function api(path, method = 'GET', body) {
@@ -125,11 +127,10 @@ function renderList() {
   const fname = id => (lib.folders.find(f => f.id === id) || {}).name;
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   if (terms.length) {  // 검색: 폴더와 상관없이 전체에서 제목/재료로 찾는다 (여러 단어는 모두 포함)
-    const hits = lib.recipes.filter(r => terms.every(t => (r.title + '|' + (r.ings || '')).toLowerCase().includes(t)));
+    const hits = lib.recipes.filter(r => terms.every(t => (r.title + '|' + (r.ings || '') + '|' + (r.author || '')).toLowerCase().includes(t)));
     $('main').innerHTML = hits.length ? hits.map(r => {
       const hint = (r.ings || '').split('|').filter(n => terms.some(t => n.toLowerCase().includes(t) && !r.title.toLowerCase().includes(t)));
-      const sub = [r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : ''].filter(Boolean).join(' · ');
-      return `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${sub ? `<br><span class="dim">${esc(sub)}</span>` : ''}</span></a>`;
+      return `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${subline([r.author, r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : ''])}</span></a>`;
     }).join('') : '<div class="r dim">검색 결과가 없습니다.</div>';
     return;
   }
@@ -142,7 +143,7 @@ function renderList() {
         <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
     ${inFolder && fname(cur) ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
-    ${shown.length ? shown.map(r => `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${cur === 'all' && r.folder_id ? `<br><span class="dim">${esc(fname(r.folder_id))}</span>` : ''}</span></a>`).join('')
+    ${shown.length ? shown.map(r => `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${subline([r.author, cur === 'all' && r.folder_id ? fname(r.folder_id) : ''])}</span></a>`).join('')
       : '<div class="r dim">저장된 레시피가 없습니다. 우측 하단 + 버튼으로 링크를 추가해 보세요.</div>'}`;
 }
 function setCur(id) { cur = id; store.set('cur', id); renderList(); }
@@ -157,20 +158,15 @@ async function delFolder() {
 }
 
 // ---- 레시피 화면
-function tsLink(url, ts) {
-  const m = /^(\d+):(\d+)$/.exec(ts || ''); if (!m) return '';
-  const sec = +m[1] * 60 + +m[2];
-  const href = /youtu/.test(url) ? url + (url.includes('?') ? '&' : '?') + 't=' + sec : url;
-  return `<a href="${esc(href)}" target="_blank" class="dim" style="margin-right:6px">${ts}</a>`;
-}
 async function showRecipe(id) {
   clearTimeout(timer); setStatus('');
   $('main').innerHTML = '<div class="r dim">불러오는 중…</div>';
   try {
     const [r] = await Promise.all([api('/api/recipes/' + id), lib.folders.length ? 0 : loadLib()]);
+    let n = 0;  // 요리 순서 번호: 섹션이 바뀌어도 이어서 센다
     $('main').innerHTML = `
       <div class="r ra"><a href="#">← 목록</a><button class="txt" onclick="delRecipe('${r.id}')">삭제</button></div>
-      <div class="head">${thumb(r.thumb)}<div class="title">${esc(r.title)}</div></div>
+      <div class="head">${thumb(r.thumb)}<div><div class="title">${esc(r.title)}</div>${r.author ? `<div class="dim">${esc(r.author)}</div>` : ''}</div></div>
       <div class="r c3"><div><div class="dim">분량</div><div>${esc(r.servings)}</div></div>
         <div><div class="dim">시간</div><div>${r.minutes}분</div></div>
         <div><div class="dim">원본</div><a href="${esc(r.url)}" target="_blank">영상 ↗</a></div></div>
@@ -180,7 +176,7 @@ async function showRecipe(id) {
       <div class="r c2"><div class="dim">재료</div>
         <div class="list">${r.ingredients.map(i => `<span>${esc(i.name)} <span class="dim">${esc(i.amount)}</span></span>`).join('')}</div></div>
       ${r.sections.map(s => `<div class="r"><div class="dim" style="margin-bottom:10px">${esc(s.title)}</div>${s.steps.map(st =>
-        `<p>${tsLink(r.url, st.timestamp)}${esc(st.text)}${st.ingredients.length ? `<br><span class="dim">${st.ingredients.map(i => esc(i.name + ' ' + i.amount)).join(' · ')}</span>` : ''}</p>`).join('')}</div>`).join('')}
+        `<p class="step"><span class="dim">${++n}</span><span>${esc(st.text)}${st.ingredients.length ? `<br><span class="dim">${st.ingredients.map(i => esc(i.name + ' ' + i.amount)).join(' · ')}</span>` : ''}</span></p>`).join('')}</div>`).join('')}
       ${r.tips.length ? `<div class="r c2"><div class="dim">팁</div><div class="list">${r.tips.map(t => `<span>${esc(t)}</span>`).join('')}</div></div>` : ''}`;
   } catch (e) { $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)} <a href="#">← 목록</a></div>`; }
 }
