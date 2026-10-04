@@ -13,7 +13,9 @@ from pydantic import BaseModel
 MODELS = [os.environ.get("GEMINI_MODEL", "gemini-flash-latest"), "gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
 COOKIES = os.environ.get("COOKIES_BROWSER")  # e.g. "chrome" or "safari", for Instagram login walls
 TOKEN = os.environ.get("APP_TOKEN")  # 설정하면 모든 /api 요청에 X-Token 헤더 필요 (공개 서버용)
-COOKIES_TXT = os.environ.get("COOKIES_TXT")  # Netscape 형식 쿠키 내용 (클라우드에서 인스타 로그인 벽 우회용, 선택)
+# 인스타 로그인 벽 우회용 쿠키(Netscape 형식): 환경변수 COOKIES_TXT 또는 Render Secret File(/etc/secrets/cookies.txt)
+_secret = Path("/etc/secrets/cookies.txt")
+COOKIES_TXT = os.environ.get("COOKIES_TXT") or (_secret.read_text() if _secret.exists() else None)
 DB_URL = os.environ.get("DATABASE_URL")  # 있으면 Postgres(클라우드), 없으면 로컬 SQLite 파일
 DB_FILE = Path(__file__).parent / "recipes.db"
 if os.environ.get("RENDER") and not DB_URL:  # Render 디스크는 재시작 때 지워지므로, DB 없이 뜨면 레시피가 조용히 사라진다

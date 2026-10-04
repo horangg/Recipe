@@ -5,3 +5,5 @@ server.log
 __pycache__/
 .env
 *.log
+cookies*.txt
+*cookies*.txt
