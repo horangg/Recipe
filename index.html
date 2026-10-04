@@ -32,6 +32,7 @@
   .txt { all:unset; cursor:pointer; text-decoration:underline; text-underline-offset:2px; }
   .txt:disabled { opacity:.4; }
   .on { background:var(--fg); color:var(--bg); padding:0 4px; margin-left:-4px; }
+  .on .dim { color:inherit; opacity:.7; }  /* 반전된 칸에서도 개수가 보이게 */
   .list > * { display:block; margin-bottom:3px; }
   .clip { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }  /* 한 줄로 자르고 … 처리 */
   .cols2 { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; justify-items:start; }  /* 폴더 목록 2열 */
@@ -137,11 +138,12 @@ function renderList() {
     return;
   }
   const shown = lib.recipes.filter(r => cur === 'all' || (cur === 'none' ? !r.folder_id : r.folder_id === cur));
-  const opt = (id, label) => `<button class="txt ${cur === id ? 'on' : ''}" style="text-decoration:none" onclick="setCur('${id}')">${esc(label)}</button>`;
+  const opt = (id, label, n) => `<button class="txt ${cur === id ? 'on' : ''}" style="text-decoration:none" onclick="setCur('${id}')">${esc(label)} <span class="dim">${n}</span></button>`;
+  const count = id => lib.recipes.filter(r => id === 'none' ? !r.folder_id : r.folder_id === id).length;  // 폴더별 레시피 수
   const inFolder = cur.length > 4;
   $('main').innerHTML = `
     <div class="r c2"><div class="dim">폴더</div>
-      <div class="list cols2">${opt('all', `전체 ${lib.recipes.length}`)}${opt('none', '분류 안 됨')}${lib.folders.map(f => opt(f.id, f.name)).join('')}
+      <div class="list cols2">${opt('all', '전체', lib.recipes.length)}${opt('none', '분류 안 됨', count('none'))}${lib.folders.map(f => opt(f.id, f.name, count(f.id))).join('')}
         <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
     ${inFolder && fname(cur) ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
