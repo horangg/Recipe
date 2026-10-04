@@ -42,9 +42,9 @@
            background-image:linear-gradient(45deg,transparent 50%,var(--fg) 50%),linear-gradient(135deg,var(--fg) 50%,transparent 50%); background-size:4px 4px; background-position:calc(100% - 5px) 55%,calc(100% - 1px) 55%; background-repeat:no-repeat; }
   p { margin:0 0 14px; }
   .step { display:grid; grid-template-columns:28px 1fr; gap:6px; }
-  /* 맨 아래 여백: 우측 하단 + 버튼과 iPhone 하단 막대(Safari 도구 막대, 홈 인디케이터)에 마지막 항목이 가리지 않게.
+  /* 맨 아래 여백: 우측 하단 + 버튼과 iPhone 하단 막대(Safari 도구 막대, 홈 인디케이터)에 마지막 항목이 가리지 않게. 값이 너무 크면 스크롤이 과해지고 작으면 가려진다 — 조절은 아래 #end 높이 하나만 바꾸면 된다.
      body 패딩 대신 실제 요소로 둬서 스크롤 가능한 높이에 확실히 포함시킨다 */
-  #end { height:calc(180px + env(safe-area-inset-bottom)); }
+  #end { height:calc(120px + env(safe-area-inset-bottom)); }  /* + 버튼(56px + 아래 20px) 위로 마지막 항목이 올라오는 최소치 92px + 여유 28px */
   #status { padding:8px 0 0; }
   #status:empty { display:none; }
   /* 우측 하단 플로팅 추가 버튼 (+ 는 글자가 아니라 선으로 그려 글자 크기 규칙을 지킨다) */
