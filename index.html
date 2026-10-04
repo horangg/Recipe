@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>레시피 추출</title>
+<style>
+  :root { --bg:#fff; --fg:#1c1c1e; --muted:#6e6e73; --line:#e5e5ea; --accent:#ff6b35; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#000; --fg:#f2f2f7; --muted:#98989d; --line:#2c2c2e; } }
+  body { font:16px/1.5 -apple-system,sans-serif; background:var(--bg); color:var(--fg); margin:0; padding:16px; padding-bottom:env(safe-area-inset-bottom); max-width:640px; margin:auto; }
+  form { display:flex; gap:8px; }
+  input { flex:1; font:inherit; padding:12px; border:1px solid var(--line); border-radius:10px; background:transparent; color:inherit; min-width:0; }
+  button { font:inherit; padding:12px 16px; border:0; border-radius:10px; background:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; }
+  h1 { font-size:22px; margin:20px 0 4px; } h2 { font-size:18px; margin:24px 0 8px; } h3 { font-size:16px; margin:16px 0 4px; }
+  .meta, .muted { color:var(--muted); font-size:14px; }
+  ul { padding:0; list-style:none; } li { padding:8px 0; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; gap:12px; }
+  ol { padding-left:20px; } ol li { display:list-item; border:0; padding:6px 0; }
+  .ts { color:var(--accent); font-variant-numeric:tabular-nums; text-decoration:none; }
+  .err { color:#d70015; }
+</style>
+</head>
+<body>
+<form id="f">
+  <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="유튜브/인스타 영상 링크 붙여넣기" required>
+  <button id="b">추출</button>
+</form>
+<div id="out"></div>
+<script>
+const $ = id => document.getElementById(id), esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ing = i => `<li><span>${esc(i.name)}</span><span class="muted">${esc(i.amount)}</span></li>`;
+
+function tsLink(url, ts) {
+  const m = /^(\d+):(\d+)$/.exec(ts || ''); if (!m) return '';
+  const sec = +m[1] * 60 + +m[2];
+  const href = /youtu/.test(url) ? url + (url.includes('?') ? '&' : '?') + 't=' + sec : url;
+  return `<a class="ts" href="${esc(href)}" target="_blank">${ts}</a> `;
+}
+
+function render(r) {
+  $('out').innerHTML = `
+    <h1>${esc(r.title)}</h1>
+    <div class="meta">${esc(r.servings)} · 약 ${r.minutes}분 · <a href="${esc(r.url)}" target="_blank">원본 영상</a></div>
+    <h2>재료</h2><ul>${r.ingredients.map(ing).join('')}</ul>
+    ${r.sections.map(s => `<h2>${esc(s.title)}</h2><ol>${s.steps.map(st =>
+      `<li>${tsLink(r.url, st.timestamp)}${esc(st.text)}${st.ingredients.length ? `<div class="muted">${st.ingredients.map(i => esc(i.name + ' ' + i.amount)).join(', ')}</div>` : ''}</li>`).join('')}</ol>`).join('')}
+    ${r.tips.length ? `<h2>팁</h2><ul>${r.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}`;
+}
+
+const tok = new URLSearchParams(location.search).get('token');
+if (tok) { try { localStorage.token = tok; } catch {} history.replaceState(null, '', location.pathname + location.search.replace(/[?&]token=[^&]*/, '')); }
+const H = () => { let t = ''; try { t = localStorage.token || ''; } catch {} return { 'Content-Type': 'application/json', 'X-Token': t }; };
+const api = async (path, opt) => { const r = await fetch(path, { headers: H(), ...opt }); const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.status); return d; };
+
+async function go(url) {
+  $('b').disabled = true; $('out').innerHTML = '<p class="muted">분석 중… (30초~2분, 화면을 켜 두세요)</p>';
+  try {
+    let d = await api('/api/recipe', { method: 'POST', body: JSON.stringify({ url }) });
+    while (d.status === 'pending') {  // 짧은 요청을 반복해 Safari/프록시 타임아웃을 피함
+      await new Promise(r => setTimeout(r, 3000));
+      d = await api('/api/job/' + d.id);
+    }
+    if (d.status === 'error') throw new Error(d.error);
+    render(d.recipe);
+  } catch (e) { $('out').innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+  $('b').disabled = false;
+}
+
+$('f').onsubmit = e => { e.preventDefault(); go($('u').value.trim()); };
+const q = new URLSearchParams(location.search).get('url');  // iOS 단축어에서 ?url=링크 로 열림
+if (q) { $('u').value = q; go(q); }
+</script>
+</body>
+</html>

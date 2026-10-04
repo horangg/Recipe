@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: recipe-app
+    runtime: docker
+    plan: free
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false        # Render 대시보드에서 직접 입력
+      - key: APP_TOKEN
+        generateValue: true  # 자동 생성된 값을 대시보드에서 확인
