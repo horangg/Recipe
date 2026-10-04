@@ -4,6 +4,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from google import genai
 from google.genai import types
@@ -40,6 +41,7 @@ HERE = Path(__file__).parent
 
 client = genai.Client()  # reads GEMINI_API_KEY
 app = FastAPI()
+app.add_middleware(GZipMiddleware, minimum_size=1000)  # 목록 JSON(썸네일 포함) 전송량 감소
 
 
 class Ingredient(BaseModel):
@@ -85,20 +87,30 @@ def run(cmd):
 UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 
 
-def fetch_embed(url: str, d: str):
-    """yt-dlp가 막혔을 때: 인스타 공개 임베드 페이지에 들어있는 video_url을 직접 받는다 (ponytail: 페이지 구조가 바뀌면 깨짐)."""
+def http_get(u):
+    return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": UA}), timeout=30)
+
+
+def embed_page(url: str) -> str:
     m = re.search(r"instagram\.com/(?:[\w.]+/)?(?:p|reels?|tv)/([\w-]+)", url)
     if not m:
         raise ValueError("인스타 게시물 주소가 아님")
-    def get(u):
-        return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": UA}), timeout=30)
-    page = get(f"https://www.instagram.com/reel/{m[1]}/embed/").read().decode("utf8", "ignore")
-    v = re.search(r'video_url\\":\\"(.*?)\\"', page)  # JSON이 문자열 안에 이스케이프되어 있음
-    if not v:
+    return http_get(f"https://www.instagram.com/reel/{m[1]}/embed/").read().decode("utf8", "ignore")
+
+
+def embed_field(page: str, key: str):
+    """임베드 페이지의 JSON(문자열 안에 2겹 이스케이프)에서 값 하나를 꺼낸다. 없으면 None."""
+    v = re.search(key + r'\\":\\"(.*?)\\"', page)
+    return json.loads('"' + json.loads('"' + v[1] + '"') + '"') if v else None
+
+
+def fetch_embed(url: str, d: str):
+    """yt-dlp가 막혔을 때: 인스타 공개 임베드 페이지에 들어있는 video_url을 직접 받는다 (ponytail: 페이지 구조가 바뀌면 깨짐)."""
+    video_url = embed_field(embed_page(url), "video_url")
+    if not video_url:
         raise ValueError("임베드 페이지에 영상 주소가 없음 (영상이 아니거나 접근 제한)")
-    video_url = json.loads('"' + json.loads('"' + v[1] + '"') + '"')  # 이스케이프 2겹 해제
     out = Path(d) / "v.mp4"
-    with get(video_url) as r, open(out, "wb") as f:
+    with http_get(video_url) as r, open(out, "wb") as f:
         while chunk := r.read(1 << 20):
             f.write(chunk)
     return out, ""
@@ -131,17 +143,17 @@ def fetch(url: str, d: str):
     return video, meta.get("description") or meta.get("title") or ""
 
 
-def thumb_from(src: str, d: str):
-    """가운데를 정사각형으로 자른 120px JPEG를 data URI로. 실패하면 None (썸네일 때문에 레시피가 실패하면 안 됨)."""
+def thumb_from(src: str, d: str, still: bool = False):
+    """가운데를 정사각형으로 자른 168px JPEG를 data URI로. 실패하면 None (썸네일 때문에 레시피가 실패하면 안 됨)."""
     out = f"{d}/t.jpg"
-    for seek in (["-ss", "1"], []):  # 영상은 1초 지점, 이미지/짧은 영상은 처음 프레임
+    for seek in ([[]] if still else [["-ss", "1"], []]):  # 영상은 1초 지점(안 되면 첫 프레임), 이미지는 그대로
         try:
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *seek, "-i", src, "-frames:v", "1",
-                            "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=120:120", "-q:v", "6", out],
+                            "-vf", "crop='min(iw,ih)':'min(iw,ih)',scale=168:168", "-q:v", "6", out],
                            check=True, capture_output=True, timeout=60)
             return "data:image/jpeg;base64," + base64.b64encode(Path(out).read_bytes()).decode()
-        except Exception:
-            continue
+        except Exception as e:
+            print("thumb_from failed:", getattr(e, "stderr", b"")[-200:] or e, flush=True)
     return None
 
 
@@ -151,9 +163,32 @@ def youtube_thumb(url: str, d: str):
         path = f"{d}/yt.jpg"
         with urllib.request.urlopen(f"https://img.youtube.com/vi/{vid}/mqdefault.jpg", timeout=15) as r, open(path, "wb") as f:
             f.write(r.read())
-        return thumb_from(path, d)
-    except Exception:
+        return thumb_from(path, d, still=True)
+    except Exception as e:
+        print("youtube_thumb failed:", e, flush=True)
         return None
+
+
+def instagram_cover(url: str, d: str):
+    """게시물 대표 이미지(작성자가 고른 커버). 영상 프레임보다 보기 좋고, 영상을 안 받아도 된다."""
+    try:
+        cover = embed_field(embed_page(url), "display_url")
+        if not cover:
+            return None
+        path = f"{d}/cover.jpg"
+        with http_get(cover) as r, open(path, "wb") as f:
+            f.write(r.read())
+        return thumb_from(path, d, still=True)
+    except Exception as e:
+        print("instagram_cover failed:", e, flush=True)
+        return None
+
+
+def thumb_for(url: str, d: str):
+    """영상을 받지 않고 만들 수 있는 썸네일 (이미 저장된 레시피에 채워 넣을 때 사용)."""
+    if re.match(r"https?://(www\.|m\.)?youtube\.com/", url):
+        return youtube_thumb(url, d)
+    return instagram_cover(url, d) if "instagram.com" in url else None
 
 
 def make_recipe(url: str):
@@ -164,7 +199,7 @@ def make_recipe(url: str):
             thumb = youtube_thumb(url, d)
             return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), "").text), thumb
         video, caption = fetch(url, d)
-        thumb = thumb_from(str(video), d)
+        thumb = instagram_cover(url, d) or thumb_from(str(video), d)  # 대표 이미지 우선, 없으면 영상 프레임
         f = client.files.upload(file=str(video))
         while f.state.name == "PROCESSING":
             time.sleep(2)
@@ -197,18 +232,32 @@ def generate(f, caption):
 jobs: dict = {}
 
 
+_conn, _lock = None, threading.Lock()
+
+
 def db(sql, args=()):
-    """SQLite/Postgres 공용. SQL은 ? 자리표시자로 작성."""
-    if DB_URL:
-        import psycopg
-        con, sql = psycopg.connect(DB_URL, autocommit=True), sql.replace("?", "%s")
-    else:
+    """SQLite/Postgres 공용. SQL은 ? 자리표시자로 작성. Postgres는 연결을 재사용한다(질문마다 TLS 연결을 새로 맺으면 느림)."""
+    global _conn
+    if not DB_URL:
         con = sqlite3.connect(DB_FILE, isolation_level=None)
-    try:
-        cur = con.execute(sql, args)
-        return cur.fetchall() if cur.description else []
-    finally:
-        con.close()
+        try:
+            cur = con.execute(sql, args)
+            return cur.fetchall() if cur.description else []
+        finally:
+            con.close()
+    import psycopg
+    sql = sql.replace("?", "%s")
+    with _lock:
+        for attempt in (0, 1):
+            try:
+                if _conn is None or _conn.closed:
+                    _conn = psycopg.connect(DB_URL, autocommit=True)
+                cur = _conn.execute(sql, args)
+                return cur.fetchall() if cur.description else []
+            except (psycopg.OperationalError, psycopg.InterfaceError):  # Neon이 유휴 연결을 끊었을 때 한 번 재연결
+                _conn = None
+                if attempt:
+                    raise
 
 
 db("CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, name TEXT NOT NULL, created TEXT NOT NULL)")
@@ -216,10 +265,19 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
       data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
 
 
-try:
-    db("ALTER TABLE recipes ADD COLUMN thumb TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
-except Exception:
-    pass
+for col in ("thumb", "ings"):
+    try:
+        db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
+    except Exception:
+        pass
+
+
+def ings_of(data: dict) -> str:  # 검색용: 재료 이름만 이어 붙인 문자열
+    return "|".join(i["name"] for i in data.get("ingredients", []))
+
+
+for rid, data in db("SELECT id, data FROM recipes WHERE ings IS NULL"):  # 검색 기능 이전에 저장된 레시피 채우기
+    db("UPDATE recipes SET ings = ? WHERE id = ?", (ings_of(json.loads(data)), rid))
 
 
 def new_id():
@@ -253,8 +311,8 @@ def work(job_id: str, url: str, folder_id):
     try:
         data, thumb = make_recipe(url)
         data["url"] = url
-        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb) VALUES (?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
-           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb))
+        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data)))
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
     except HTTPException as e:
         jobs[job_id].update(status="error", error=e.detail)
@@ -295,8 +353,8 @@ def library(x_token: str | None = Header(None)):
     check(x_token)
     return {
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
-        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "created": r[3], "url": r[4], "thumb": r[5]}
-                    for r in db("SELECT id, title, folder_id, created, url, thumb FROM recipes ORDER BY created DESC")],
+        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": r[3], "ings": r[4]}
+                    for r in db("SELECT id, title, folder_id, thumb, ings FROM recipes ORDER BY created DESC")],
         "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error") if x in v}}
                  for k, v in jobs.items() if v["status"] != "done"],
     }
@@ -364,3 +422,25 @@ def manifest():
 @app.get("/icon.png")
 def icon():
     return FileResponse(HERE / "icon.png")
+
+
+def backfill_thumbs():
+    """썸네일이 없는 기존 레시피에 서버 시작 때 채워 넣는다 (한 번에 최대 20개, 실패하면 다음 시작 때 재시도)."""
+    for rid, url in db("SELECT id, url FROM recipes WHERE thumb IS NULL LIMIT 20"):
+        with tempfile.TemporaryDirectory() as d:
+            t = thumb_for(url, d)
+        if t:
+            db("UPDATE recipes SET thumb = ? WHERE id = ?", (t, rid))
+
+
+threading.Thread(target=backfill_thumbs, daemon=True).start()
+
+
+@app.get("/health")
+def health():  # 외부 핑(UptimeRobot)용: DB를 건드리지 않는다
+    return {"ok": True}
+
+
+@app.get("/sw.js")
+def sw():
+    return FileResponse(HERE / "sw.js", media_type="text/javascript", headers={"Cache-Control": "no-cache"})

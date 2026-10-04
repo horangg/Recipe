@@ -15,7 +15,7 @@
   * { box-sizing:border-box; }
   html { background:var(--bg); }
   /* 글자 크기는 한 가지(18px)만 쓴다. 위계는 색(dim)과 굵기로만 표현 */
-  body { margin:0 auto; max-width:640px; padding:20px 20px calc(32px + env(safe-area-inset-bottom)); background:var(--bg); color:var(--fg);
+  body { margin:0 auto; max-width:640px; padding:20px 20px calc(110px + env(safe-area-inset-bottom)); background:var(--bg); color:var(--fg);
          font:400 18px/1.25 "Helvetica Neue", Helvetica, Arial, "Apple SD Gothic Neo", sans-serif; letter-spacing:-.01em; -webkit-font-smoothing:antialiased;
          word-break:keep-all; overflow-wrap:break-word; }
   a { color:inherit; }
@@ -33,26 +33,44 @@
   .txt:disabled { opacity:.4; }
   .on { background:var(--fg); color:var(--bg); padding:0 4px; margin-left:-4px; }
   .list > * { display:block; margin-bottom:3px; }
-  form { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:end; padding-bottom:12px; }
-  input { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:6px 0; outline:none; min-width:0; }
+  input { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:6px 0; outline:none; min-width:0; width:100%; -webkit-appearance:none; appearance:none; }
   input::placeholder { color:var(--dim); }
   select { font:inherit; color:inherit; background:transparent; border:0; border-bottom:1px solid var(--fg); border-radius:0; padding:0 14px 0 0; appearance:none; -webkit-appearance:none; max-width:100%;
            background-image:linear-gradient(45deg,transparent 50%,var(--fg) 50%),linear-gradient(135deg,var(--fg) 50%,transparent 50%); background-size:4px 4px; background-position:calc(100% - 5px) 55%,calc(100% - 1px) 55%; background-repeat:no-repeat; }
   p { margin:0 0 14px; }
+  #status { padding:8px 0 0; }
+  #status:empty { display:none; }
+  /* 우측 하단 플로팅 추가 버튼 (+ 는 글자가 아니라 선으로 그려 글자 크기 규칙을 지킨다) */
+  #fab { position:fixed; right:20px; bottom:calc(20px + env(safe-area-inset-bottom)); width:56px; height:56px; border:0; padding:0; background:var(--fg); cursor:pointer; z-index:5; }
+  #fab::before, #fab::after { content:""; position:absolute; left:50%; top:50%; background:var(--bg); transform:translate(-50%,-50%); }
+  #fab::before { width:20px; height:2px; } #fab::after { width:2px; height:20px; }
+  #sheet { position:fixed; inset:0; background:var(--bg); padding:20px; z-index:10; }
+  #sheet[hidden] { display:none; }
+  #sheet form { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:end; }
+  .detail #q, .detail #fab { display:none; }
 </style>
 </head>
 <body>
-<form id="f">
-  <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 붙여넣기" required>
-  <button class="txt" id="b">추출 →</button>
-</form>
+<input id="q" type="text" inputmode="search" enterkeyhint="search" autocapitalize="off" autocorrect="off" placeholder="검색 (제목, 재료)">
 <div id="jobs"></div>
+<div id="status" class="dim"></div>
 <div id="main"></div>
+
+<button id="fab" aria-label="레시피 추가" onclick="openSheet()"></button>
+<div id="sheet" hidden>
+  <form id="f">
+    <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 붙여넣기" required>
+    <button class="txt" id="b">추출 →</button>
+  </form>
+  <div class="r" style="margin-top:16px"><button class="txt" onclick="closeSheet()">닫기</button></div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const store = { get: k => { try { return localStorage[k] || ''; } catch { return ''; } }, set: (k, v) => { try { localStorage[k] = v; } catch {} } };
 const thumb = t => t ? `<img class="th" src="${t}" alt="">` : '<div class="ph"></div>';
+const setStatus = t => { $('status').textContent = t; };
 
 // ---- API (토큰이 없거나 틀리면 한 번 물어봄)
 async function api(path, method = 'GET', body) {
@@ -72,9 +90,14 @@ async function api(path, method = 'GET', body) {
 // ---- 상태
 let lib = { folders: [], recipes: [], jobs: [] };
 let cur = store.get('cur') || 'all';   // 'all' | 'none' | 폴더 id
+let q = '';                            // 검색어
 let timer;
 
-async function loadLib() { lib = await api('/api/library'); renderJobs(); }
+async function loadLib() {
+  lib = await api('/api/library');
+  store.set('lib', JSON.stringify(lib));  // 다음 방문 때 서버를 기다리지 않고 바로 보여주기 위해 저장
+  renderJobs();
+}
 
 function renderJobs() {
   $('jobs').innerHTML = lib.jobs.map(j => j.status === 'error'
@@ -84,11 +107,32 @@ function renderJobs() {
 async function dismiss(id) { await api('/api/job/' + id, 'DELETE'); await loadLib(); }
 
 // ---- 목록 화면
+// 1) 저장해 둔 목록을 즉시 그리고  2) 서버에서 최신 목록을 받아 다시 그린다 (서버가 잠들어 있어도 화면은 바로 보인다)
 async function showList() {
   clearTimeout(timer);
-  try { await loadLib(); } catch (e) { $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)}</div>`; return; }
+  let shownCache = false;
+  try { const c = JSON.parse(store.get('lib') || 'null'); if (c) { lib = c; renderJobs(); renderList(); shownCache = true; } } catch {}
+  if (!shownCache) $('main').innerHTML = '';
+  setStatus(shownCache ? '최신 목록 확인 중…' : '불러오는 중… (서버가 잠들어 있으면 1분 정도 걸릴 수 있어요)');
+  try { await loadLib(); setStatus(''); }
+  catch (e) { setStatus(shownCache ? '서버에 연결할 수 없어 저장된 목록을 보여드립니다' : ''); if (!shownCache) $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)}</div>`; return; }
   if (cur !== 'all' && cur !== 'none' && !lib.folders.some(f => f.id === cur)) cur = 'all';
+  renderList();
+  if (lib.jobs.some(j => j.status === 'pending')) timer = setTimeout(() => !location.hash && showList(), 4000);
+}
+
+function renderList() {
   const fname = id => (lib.folders.find(f => f.id === id) || {}).name;
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length) {  // 검색: 폴더와 상관없이 전체에서 제목/재료로 찾는다 (여러 단어는 모두 포함)
+    const hits = lib.recipes.filter(r => terms.every(t => (r.title + '|' + (r.ings || '')).toLowerCase().includes(t)));
+    $('main').innerHTML = hits.length ? hits.map(r => {
+      const hint = (r.ings || '').split('|').filter(n => terms.some(t => n.toLowerCase().includes(t) && !r.title.toLowerCase().includes(t)));
+      const sub = [r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : ''].filter(Boolean).join(' · ');
+      return `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${sub ? `<br><span class="dim">${esc(sub)}</span>` : ''}</span></a>`;
+    }).join('') : '<div class="r dim">검색 결과가 없습니다.</div>';
+    return;
+  }
   const shown = lib.recipes.filter(r => cur === 'all' || (cur === 'none' ? !r.folder_id : r.folder_id === cur));
   const opt = (id, label) => `<button class="txt ${cur === id ? 'on' : ''}" style="text-decoration:none" onclick="setCur('${id}')">${esc(label)}</button>`;
   const inFolder = cur.length > 4;
@@ -96,21 +140,20 @@ async function showList() {
     <div class="r c2"><div class="dim">폴더</div>
       <div class="list">${opt('all', `전체 ${lib.recipes.length}`)}${opt('none', '분류 안 됨')}${lib.folders.map(f => opt(f.id, f.name)).join('')}
         <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
-    ${inFolder ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
+    ${inFolder && fname(cur) ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
     ${shown.length ? shown.map(r => `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${cur === 'all' && r.folder_id ? `<br><span class="dim">${esc(fname(r.folder_id))}</span>` : ''}</span></a>`).join('')
-      : '<div class="r dim">저장된 레시피가 없습니다. 위에 링크를 붙여넣어 보세요.</div>'}`;
-  if (lib.jobs.some(j => j.status === 'pending')) timer = setTimeout(() => !location.hash && showList(), 4000);
+      : '<div class="r dim">저장된 레시피가 없습니다. 우측 하단 + 버튼으로 링크를 추가해 보세요.</div>'}`;
 }
-function setCur(id) { cur = id; store.set('cur', id); showList(); }
-async function addFolder() { const name = prompt('새 폴더 이름'); if (!name) return; const f = await api('/api/folders', 'POST', { name }); setCur(f.id); }
+function setCur(id) { cur = id; store.set('cur', id); renderList(); }
+async function addFolder() { const name = prompt('새 폴더 이름'); if (!name) return; const f = await api('/api/folders', 'POST', { name }); await loadLib(); setCur(f.id); }
 async function renameFolder() {
   const old = lib.folders.find(f => f.id === cur).name, name = prompt('폴더 이름 변경', old);
-  if (name && name !== old) { await api('/api/folders/' + cur, 'PATCH', { name }); showList(); }
+  if (name && name !== old) { await api('/api/folders/' + cur, 'PATCH', { name }); await loadLib(); renderList(); }
 }
 async function delFolder() {
   if (!confirm('폴더를 삭제할까요? 안의 레시피는 삭제되지 않고 "분류 안 됨"으로 이동합니다.')) return;
-  await api('/api/folders/' + cur, 'DELETE'); setCur('all');
+  await api('/api/folders/' + cur, 'DELETE'); await loadLib(); setCur('all');
 }
 
 // ---- 레시피 화면
@@ -121,7 +164,7 @@ function tsLink(url, ts) {
   return `<a href="${esc(href)}" target="_blank" class="dim" style="margin-right:6px">${ts}</a>`;
 }
 async function showRecipe(id) {
-  clearTimeout(timer);
+  clearTimeout(timer); setStatus('');
   $('main').innerHTML = '<div class="r dim">불러오는 중…</div>';
   try {
     const [r] = await Promise.all([api('/api/recipes/' + id), lib.folders.length ? 0 : loadLib()]);
@@ -141,12 +184,15 @@ async function showRecipe(id) {
       ${r.tips.length ? `<div class="r c2"><div class="dim">팁</div><div class="list">${r.tips.map(t => `<span>${esc(t)}</span>`).join('')}</div></div>` : ''}`;
   } catch (e) { $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)} <a href="#">← 목록</a></div>`; }
 }
-async function move(id, folder_id) { await api('/api/recipes/' + id, 'PATCH', { folder_id }); lib.folders.length = 0; await loadLib(); }
-async function delRecipe(id) { if (confirm('이 레시피를 삭제할까요?')) { await api('/api/recipes/' + id, 'DELETE'); location.hash = ''; } }
+async function move(id, folder_id) { await api('/api/recipes/' + id, 'PATCH', { folder_id }); await loadLib(); }
+async function delRecipe(id) { if (confirm('이 레시피를 삭제할까요?')) { await api('/api/recipes/' + id, 'DELETE'); await loadLib().catch(() => {}); location.hash = ''; } }
 
-// ---- 추출
+// ---- 추출 (우측 하단 + 버튼 -> 링크 입력창)
+function openSheet() { $('sheet').hidden = false; $('u').focus(); }
+function closeSheet() { $('sheet').hidden = true; }
+
 async function go(url) {
-  $('b').disabled = true; $('jobs').innerHTML = '<div class="r c2"><div>분석 중…</div><div class="dim">30초~2분, 화면을 켜 두세요</div></div>';
+  $('fab').disabled = true; $('jobs').innerHTML = '<div class="r c2"><div>분석 중…</div><div class="dim">30초~2분, 화면을 켜 두세요</div></div>';
   try {
     let d = await api('/api/recipe', 'POST', { url, folder_id: cur.length > 4 ? cur : null });
     const id = d.id;  // job 응답에는 id가 없으므로 따로 보관
@@ -155,21 +201,28 @@ async function go(url) {
       d = await api('/api/job/' + id);
     }
     if (d.status === 'error') throw new Error(d.error);
-    $('u').value = ''; $('jobs').innerHTML = ''; lib.folders.length = 0; location.hash = '#r/' + d.recipe.id; route();
+    $('u').value = ''; $('jobs').innerHTML = ''; await loadLib().catch(() => {}); location.hash = '#r/' + d.recipe.id; route();
   } catch (e) { $('jobs').innerHTML = `<div class="r"><b>실패</b> ${esc(e.message)}</div>`; }
-  $('b').disabled = false;
+  $('fab').disabled = false;
 }
 
-function route() { const m = /^#r\/(\w+)/.exec(location.hash); m ? showRecipe(m[1]) : showList(); }
+function route() {
+  const m = /^#r\/(\w+)/.exec(location.hash);
+  document.body.classList.toggle('detail', !!m);
+  m ? showRecipe(m[1]) : showList();
+}
 addEventListener('hashchange', route);
-$('f').onsubmit = e => { e.preventDefault(); go($('u').value.trim()); };
+$('q').addEventListener('input', e => { q = e.target.value; renderList(); });
+$('f').onsubmit = e => { e.preventDefault(); const url = $('u').value.trim(); closeSheet(); go(url); };
 
 // ?token=, ?url= (단축어/공유에서 열릴 때)
 const qs = new URLSearchParams(location.search);
 if (qs.get('token')) store.set('token', qs.get('token'));
 if (qs.has('token') || qs.has('url')) history.replaceState(null, '', location.pathname + location.hash);
 route();
-if (qs.get('url')) { $('u').value = qs.get('url'); go(qs.get('url')); }
+if (qs.get('url')) go(qs.get('url'));
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});  // 앱 껍데기 캐시 (첫 화면 즉시 표시)
 </script>
 </body>
 </html>
