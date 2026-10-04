@@ -1,5 +1,7 @@
 import base64, hashlib, json, os, re, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
 from datetime import datetime, timezone
+from functools import lru_cache
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -69,13 +71,14 @@ class Recipe(BaseModel):
     tips: list[str]
 
 
-PROMPT = """첨부된 요리 영상의 화면, 음성, 자막과 아래 캡션을 모두 종합해 한국어 레시피를 만들어라.
-- 캡션에 재료/분량이 있으면 가장 우선 신뢰하고, 영상과 다르면 영상 기준으로 보정.
+PROMPT = """첨부된 요리 콘텐츠(영상, 사진 게시물, 또는 글)를 종합해 한국어 레시피를 만들어라.
+- 영상이면 화면·음성·자막을, 사진 게시물이면 사진 속 글자와 사진 순서를, 글이면 본문을 근거로 삼는다.
+- 아래 캡션/본문에 재료·분량이 있으면 가장 우선 신뢰하고, 영상·사진과 다르면 영상·사진 기준으로 보정.
 - 재료는 같은 것끼리 합치고 분량은 단위를 통일(g, ml, 큰술 등). 분량을 알 수 없으면 "적당량".
-- 조리 순서는 섹션으로 나누고, 각 단계에 영상의 해당 시점(mm:ss)과 그 단계에 쓰는 재료를 붙여라.
-- 영상에 없는 내용은 지어내지 마라.
+- 조리 순서는 섹션으로 나누고, 각 단계에 그 단계에 쓰는 재료를 붙여라. timestamp는 영상일 때만 해당 시점(mm:ss)을 쓰고, 사진·글이면 빈 문자열.
+- 콘텐츠에 없는 내용은 지어내지 마라. 요리 레시피가 아니면 title에 "레시피 아님"이라고 쓰고 나머지는 비워라.
 
-캡션:
+캡션/본문:
 {caption}
 """
 
@@ -91,6 +94,7 @@ def http_get(u):
     return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": UA}), timeout=30)
 
 
+@lru_cache(maxsize=32)  # 한 번의 추출에서 같은 페이지를 여러 번(커버·게시자·종류 판별) 읽으므로 캐시
 def embed_page(url: str) -> str:
     m = re.search(r"instagram\.com/(?:[\w.]+/)?(?:p|reels?|tv)/([\w-]+)", url)
     if not m:
@@ -98,10 +102,19 @@ def embed_page(url: str) -> str:
     return http_get(f"https://www.instagram.com/reel/{m[1]}/embed/").read().decode("utf8", "ignore")
 
 
+def embed_fields(page: str, key: str):
+    """임베드 페이지의 JSON(문자열 안에 2겹 이스케이프)에서 key의 모든 값."""
+    return [json.loads('"' + json.loads('"' + m[1] + '"') + '"') for m in re.finditer(key + r'\\":\\"(.*?)\\"', page)]
+
+
 def embed_field(page: str, key: str):
-    """임베드 페이지의 JSON(문자열 안에 2겹 이스케이프)에서 값 하나를 꺼낸다. 없으면 None."""
-    v = re.search(key + r'\\":\\"(.*?)\\"', page)
-    return json.loads('"' + json.loads('"' + v[1] + '"') + '"') if v else None
+    f = embed_fields(page, key)
+    return f[0] if f else None
+
+
+def embed_caption(page: str) -> str:
+    m = re.search(r'edge_media_to_caption\\":\{\\"edges\\":\[\{\\"node\\":\{\\"text\\":\\"(.*?)(?<!\\\\)\\"', page)
+    return json.loads('"' + json.loads('"' + m[1] + '"') + '"') if m else ""
 
 
 def fetch_embed(url: str, d: str):
@@ -135,6 +148,8 @@ def fetch(url: str, d: str):
         run(base + ["-f", "bv*[height<=480]+ba/b[height<=480]/b", "--merge-output-format", "mp4", "-o", f"{d}/v.%(ext)s", url])
     except subprocess.CalledProcessError as e:
         errs = " ".join(l for l in e.stderr.splitlines() if l.startswith("ERROR"))  # 핵심 ERROR 줄만
+        if "instagram.com" not in url:  # 임베드 대체 경로는 인스타 전용 — 다른 사이트 오류에 인스타 얘기를 섞지 않는다
+            raise HTTPException(502, f"영상 다운로드 실패: {(errs or e.stderr.strip())[:300]}")
         try:
             return fetch_embed(url, d)
         except Exception as e2:
@@ -211,7 +226,10 @@ def author_for(url: str):
     """(이름, 프로필 주소) — 못 구하면 (None, None)"""
     if re.match(r"https?://(www\.|m\.)?youtube\.com/", url):
         return youtube_author(url)
-    return instagram_author(url) if "instagram.com" in url else (None, None)
+    if "instagram.com" in url:
+        return instagram_author(url)
+    u = urlparse(url)  # 일반 페이지: 사이트 도메인을 게시자로 (네트워크 호출 없음)
+    return (u.netloc.removeprefix("www."), f"{u.scheme}://{u.netloc}/") if u.netloc else (None, None)
 
 
 def thumb_for(url: str, d: str):
@@ -221,6 +239,51 @@ def thumb_for(url: str, d: str):
     return instagram_cover(url, d) if "instagram.com" in url else None
 
 
+def instagram_kind(url: str):
+    """'video' | 'image' | None(임베드를 못 읽음). 사진 게시물(여러 장 포함)은 영상 주소가 없다."""
+    try:
+        page = embed_page(url)
+    except Exception:
+        return None
+    if embed_field(page, "video_url"):
+        return "video"
+    return "image" if embed_fields(page, "display_url") else None
+
+
+class _Text(HTMLParser):
+    SKIP = {"script", "style", "noscript", "nav", "header", "footer", "aside", "svg", "form"}
+
+    def __init__(self):
+        super().__init__()
+        self.out, self.skip = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        self.skip += tag in self.SKIP
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self.skip:
+            self.skip -= 1
+
+    def handle_data(self, data):
+        if not self.skip and data.strip():
+            self.out.append(data.strip())
+
+
+def fetch_webpage(url: str):
+    """블로그/웹 페이지 -> (본문 텍스트, 대표 이미지 주소 또는 None). ponytail: 자바스크립트로 그리는 페이지는 본문이 비어 실패한다."""
+    m = re.match(r"https?://blog\.naver\.com/([\w-]+)/(\d+)", url)
+    if m:  # PC 네이버 블로그는 본문이 iframe 안이라 비어 보인다 -> 모바일 주소는 본문이 바로 들어 있다
+        url = f"https://m.blog.naver.com/{m[1]}/{m[2]}"
+    with http_get(url) as r:
+        html = r.read(3_000_000).decode(r.headers.get_content_charset() or "utf-8", "ignore")
+    t = _Text()
+    t.feed(html)
+    text = re.sub(r"\s+", " ", " ".join(t.out))[:20000]
+    og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', html) \
+        or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html)
+    return text, urllib.parse.urljoin(url, og[1]) if og else None
+
+
 def make_recipe(url: str):
     """(레시피 dict, 썸네일 data URI 또는 None, (게시자 이름, 프로필 주소))"""
     with tempfile.TemporaryDirectory() as d:
@@ -228,7 +291,35 @@ def make_recipe(url: str):
             # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
             thumb = youtube_thumb(url, d)
             return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), "").text), thumb, author_for(url)
-        video, caption = fetch(url, d)
+        if "instagram.com" in url and instagram_kind(url) == "image":
+            # 사진 게시물(여러 장 포함): 캡션 + 사진 전체를 Gemini에 넘긴다
+            page = embed_page(url)
+            parts = []
+            for u in list(dict.fromkeys(embed_fields(page, "display_url")))[:10]:  # 중복 제거, 최대 10장
+                with http_get(u) as r:
+                    parts.append(types.Part.from_bytes(data=r.read(), mime_type=r.headers.get_content_type() or "image/jpeg"))
+            return json.loads(generate(parts, embed_caption(page)).text), instagram_cover(url, d), author_for(url)
+        try:
+            video, caption = fetch(url, d)
+        except HTTPException as e:
+            if "instagram.com" in url:
+                raise
+            # 영상이 아니면 웹 페이지 본문으로 시도 (실패하면 영상 다운로드 오류도 함께 보여준다)
+            try:
+                text, img = fetch_webpage(url)
+            except Exception as e2:
+                raise HTTPException(502, f"{e.detail} | 웹 페이지 읽기도 실패: {e2}")
+            if len(text) < 200:
+                raise HTTPException(502, f"{e.detail} | 페이지에서 본문을 읽지 못했습니다 (로그인이 필요하거나 스크립트로 그리는 페이지일 수 있어요)")
+            thumb = None
+            if img:
+                try:
+                    with http_get(img) as r, open(f"{d}/og.jpg", "wb") as f:
+                        f.write(r.read())
+                    thumb = thumb_from(f"{d}/og.jpg", d, still=True)
+                except Exception as e3:
+                    print("og:image failed:", e3, flush=True)
+            return json.loads(generate(None, text).text), thumb, author_for(url)
         thumb = instagram_cover(url, d) or thumb_from(str(video), d)  # 대표 이미지 우선, 없으면 영상 프레임
         f = client.files.upload(file=str(video))
         while f.state.name == "PROCESSING":
@@ -244,13 +335,15 @@ def make_recipe(url: str):
 
 
 def generate(f, caption):
+    """f: 영상 파일 / 이미지 Part 목록 / None(글만)"""
+    media = [] if f is None else f if isinstance(f, list) else [f]
     err = None
     for attempt in range(3):
         for model in MODELS:
             try:
                 return client.models.generate_content(
                     model=model,
-                    contents=[f, PROMPT.format(caption=caption)],
+                    contents=[*media, PROMPT.format(caption=caption)],
                     config={"response_mime_type": "application/json", "response_schema": Recipe},
                 )
             except genai.errors.APIError as e:
@@ -318,13 +411,18 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def norm(url):  # 같은 영상이 추적 파라미터(igsh 등)만 달라 중복 저장되지 않게
+def norm(url):  # 같은 게시물이 추적 파라미터(igsh, si 등)만 달라 중복 저장되지 않게
     u = urlparse(url)
     vid = u.path.strip("/").split("/")[-1]
     if u.netloc == "youtu.be" or (u.netloc.endswith("youtube.com") and u.path.startswith("/shorts/")):
         return f"https://www.youtube.com/watch?v={vid}"  # 짧은 링크/쇼츠도 watch 형태로 통일
-    q = {k: v for k, v in parse_qs(u.query).items() if k == "v"}
-    return urlunparse((u.scheme, u.netloc, u.path.rstrip("/"), "", urlencode(q, doseq=True), ""))
+    if u.netloc.endswith("youtube.com"):
+        query = urlencode({k: v for k, v in parse_qs(u.query).items() if k == "v"}, doseq=True)
+    elif u.netloc.endswith("instagram.com"):
+        query = ""
+    else:
+        query = u.query  # 블로그 등 일반 페이지는 글을 가리키는 값이 쿼리에 있는 경우가 많아 유지
+    return urlunparse((u.scheme, u.netloc, u.path.rstrip("/") if query == "" else u.path, "", query, ""))
 
 
 def check(token):
@@ -340,6 +438,8 @@ def by_url(url):
 def work(job_id: str, url: str, folder_id):
     try:
         data, thumb, (author, author_url) = make_recipe(url)
+        if data["title"].strip() == "레시피 아님":  # 프롬프트가 요리와 무관한 콘텐츠에 쓰라고 한 표식 — 저장하지 않는다
+            raise HTTPException(422, "요리 레시피가 아닌 콘텐츠로 보여 저장하지 않았습니다")
         data["url"] = url
         db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
            (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url))

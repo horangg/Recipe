@@ -169,7 +169,7 @@ async function showRecipe(id) {
       <div class="head">${thumb(r.thumb)}<div><div class="title">${esc(r.title)}</div>${r.author ? (r.author_url ? `<a class="dim" href="${esc(r.author_url)}" target="_blank" rel="noopener">${esc(r.author)}</a>` : `<div class="dim">${esc(r.author)}</div>`) : ''}</div></div>
       <div class="r c3"><div><div class="dim">분량</div><div>${esc(r.servings)}</div></div>
         <div><div class="dim">시간</div><div>${r.minutes}분</div></div>
-        <div><div class="dim">원본</div><a href="${esc(r.url)}" target="_blank">영상 ↗</a></div></div>
+        <div><div class="dim">원본</div><a href="${esc(r.url)}" target="_blank">열기 ↗</a></div></div>
       <div class="r"><div class="dim">폴더</div>
         <select onchange="move('${r.id}', this.value)"><option value="">분류 안 됨</option>
           ${lib.folders.map(f => `<option value="${f.id}" ${f.id === r.folder_id ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select></div>
