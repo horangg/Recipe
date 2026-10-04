@@ -1,4 +1,4 @@
-import json, os, re, sqlite3, subprocess, tempfile, threading, time, uuid
+import base64, json, os, re, sqlite3, subprocess, tempfile, threading, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -13,9 +13,10 @@ from pydantic import BaseModel
 MODELS = [os.environ.get("GEMINI_MODEL", "gemini-flash-latest"), "gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
 COOKIES = os.environ.get("COOKIES_BROWSER")  # e.g. "chrome" or "safari", for Instagram login walls
 TOKEN = os.environ.get("APP_TOKEN")  # 설정하면 모든 /api 요청에 X-Token 헤더 필요 (공개 서버용)
-# 인스타 로그인 벽 우회용 쿠키(Netscape 형식): 환경변수 COOKIES_TXT 또는 Render Secret File(/etc/secrets/cookies.txt)
+# 인스타 로그인 벽 우회용 쿠키(Netscape 형식). 우선순위: COOKIES_B64(base64 한 줄, 붙여넣기 사고에 안전) > COOKIES_TXT > Secret File
 _secret = Path("/etc/secrets/cookies.txt")
-COOKIES_TXT = os.environ.get("COOKIES_TXT") or (_secret.read_text() if _secret.exists() else None)
+COOKIES_TXT = (base64.b64decode(os.environ["COOKIES_B64"]).decode() if os.environ.get("COOKIES_B64") else None) \
+    or os.environ.get("COOKIES_TXT") or (_secret.read_text() if _secret.exists() else None)
 DB_URL = os.environ.get("DATABASE_URL")  # 있으면 Postgres(클라우드), 없으면 로컬 SQLite 파일
 DB_FILE = Path(__file__).parent / "recipes.db"
 if os.environ.get("RENDER") and not DB_URL:  # Render 디스크는 재시작 때 지워지므로, DB 없이 뜨면 레시피가 조용히 사라진다
@@ -71,13 +72,16 @@ def fetch(url: str, d: str):
     if COOKIES:
         base += ["--cookies-from-browser", COOKIES]
     if COOKIES_TXT:
+        if not any(l.count("\t") == 6 for l in COOKIES_TXT.splitlines()):  # 탭 7칸 = 정상 쿠키 줄
+            raise HTTPException(500, "쿠키 설정이 올바르지 않습니다 (Netscape 형식 쿠키 줄이 없음). COOKIES_B64를 다시 만드세요.")
         (Path(d) / "cookies.txt").write_text(COOKIES_TXT)
         base += ["--cookies", f"{d}/cookies.txt"]
     try:
         meta = json.loads(run(base + ["--dump-json", url]).stdout)
         run(base + ["-f", "bv*[height<=480]+ba/b[height<=480]/b", "--merge-output-format", "mp4", "-o", f"{d}/v.%(ext)s", url])
     except subprocess.CalledProcessError as e:
-        raise HTTPException(502, f"영상 다운로드 실패: {e.stderr.strip()[-300:]}")
+        errs = " ".join(l for l in e.stderr.splitlines() if l.startswith("ERROR"))  # 핵심 ERROR 줄만
+        raise HTTPException(502, f"영상 다운로드 실패: {(errs or e.stderr.strip())[:400]}")
     video = next(Path(d).glob("v.*"))
     return video, meta.get("description") or meta.get("title") or ""
 
