@@ -1,4 +1,4 @@
-import base64, json, os, re, sqlite3, subprocess, tempfile, threading, time, uuid
+import base64, json, os, re, sqlite3, subprocess, tempfile, threading, time, urllib.request, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -82,6 +82,28 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, check=True)
 
 
+UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+
+
+def fetch_embed(url: str, d: str):
+    """yt-dlp가 막혔을 때: 인스타 공개 임베드 페이지에 들어있는 video_url을 직접 받는다 (ponytail: 페이지 구조가 바뀌면 깨짐)."""
+    m = re.search(r"instagram\.com/(?:[\w.]+/)?(?:p|reels?|tv)/([\w-]+)", url)
+    if not m:
+        raise ValueError("인스타 게시물 주소가 아님")
+    def get(u):
+        return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": UA}), timeout=30)
+    page = get(f"https://www.instagram.com/reel/{m[1]}/embed/").read().decode("utf8", "ignore")
+    v = re.search(r'video_url\\":\\"(.*?)\\"', page)  # JSON이 문자열 안에 이스케이프되어 있음
+    if not v:
+        raise ValueError("임베드 페이지에 영상 주소가 없음 (영상이 아니거나 접근 제한)")
+    video_url = json.loads('"' + json.loads('"' + v[1] + '"') + '"')  # 이스케이프 2겹 해제
+    out = Path(d) / "v.mp4"
+    with get(video_url) as r, open(out, "wb") as f:
+        while chunk := r.read(1 << 20):
+            f.write(chunk)
+    return out, ""
+
+
 def fetch(url: str, d: str):
     base = ["yt-dlp", "--no-playlist", "--no-warnings"]
     if COOKIES:
@@ -101,7 +123,10 @@ def fetch(url: str, d: str):
         run(base + ["-f", "bv*[height<=480]+ba/b[height<=480]/b", "--merge-output-format", "mp4", "-o", f"{d}/v.%(ext)s", url])
     except subprocess.CalledProcessError as e:
         errs = " ".join(l for l in e.stderr.splitlines() if l.startswith("ERROR"))  # 핵심 ERROR 줄만
-        raise HTTPException(502, f"영상 다운로드 실패: {(errs or e.stderr.strip())[:400]}")
+        try:
+            return fetch_embed(url, d)
+        except Exception as e2:
+            raise HTTPException(502, f"영상 다운로드 실패: {(errs or e.stderr.strip())[:300]} | 임베드 대체 경로도 실패: {e2}")
     video = next(Path(d).glob("v.*"))
     return video, meta.get("description") or meta.get("title") or ""
 
