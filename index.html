@@ -67,7 +67,7 @@
 <button id="fab" aria-label="레시피 추가" onclick="openSheet()"></button>
 <div id="sheet" hidden>
   <form id="f">
-    <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 붙여넣기" required>
+    <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 또는 레시피 글 붙여넣기" required>
     <button class="txt" id="b">추출 →</button>
   </form>
   <div class="r" style="margin-top:16px"><button class="txt" onclick="closeSheet()">닫기</button></div>
@@ -173,7 +173,7 @@ async function showRecipe(id) {
     const [r] = await Promise.all([api('/api/recipes/' + id), lib.folders.length ? 0 : loadLib()]);
     let n = 0;  // 요리 순서 번호: 섹션이 바뀌어도 이어서 센다
     $('main').innerHTML = `
-      <div class="r ra"><a href="#">← 목록</a><button class="txt" onclick="delRecipe('${r.id}')">삭제</button></div>
+      <div class="r ra"><a href="#">← 목록</a><span><button class="txt" onclick="shareRecipe('${r.id}', ${esc(JSON.stringify(r.title))}, ${esc(JSON.stringify(r.share || ''))})">공유</button>${r.share ? ' &nbsp; <button class="txt" onclick="unshare(\'' + r.id + '\')">공유 중지</button>' : ''} &nbsp; <button class="txt" onclick="delRecipe('${r.id}')">삭제</button></span></div>
       <div class="head">${thumb(r.thumb)}<div><div class="title">${esc(r.title)}</div>${r.author ? (r.author_url ? `<a class="dim" href="${esc(r.author_url)}" target="_blank" rel="noopener">${esc(r.author)}</a>` : `<div class="dim">${esc(r.author)}</div>`) : ''}</div></div>
       <div class="r c3"><div><div class="dim">분량</div><div>${esc(r.servings)}</div></div>
         <div><div class="dim">시간</div><div>${r.minutes}분</div></div>
@@ -189,6 +189,23 @@ async function showRecipe(id) {
   } catch (e) { $('main').innerHTML = `<div class="r"><b>오류</b> ${esc(e.message)} <a href="#">← 목록</a></div>`; }
 }
 async function move(id, folder_id) { await api('/api/recipes/' + id, 'PATCH', { folder_id }); await loadLib(); }
+// ---- 공유: 링크는 {주소}/s/{토큰}. 받는 사람은 토큰 없이 그 레시피 하나만 읽기 전용으로 본다
+async function shareRecipe(id, title, token) {
+  const link = t => location.origin + '/s/' + t;
+  const send = async t => {   // 공유 시트 -> (안 되면) 클립보드 복사 -> (안 되면) false
+    if (navigator.share) { try { await navigator.share({ title, url: link(t) }); return true; } catch (e) { if (e.name === 'AbortError') return true; } }
+    try { await navigator.clipboard.writeText(link(t)); setStatus('공유 링크를 복사했어요'); return true; } catch { return false; }
+  };
+  // 링크가 이미 있으면 사용자 동작 직후 바로 공유 시트를 연다 (iOS는 비동기 대기 뒤의 공유 시트를 막는 경우가 있다)
+  if (token) { if (!(await send(token))) prompt('이 링크를 복사해 보내세요', link(token)); return; }
+  try { token = (await api('/api/recipes/' + id + '/share', 'POST')).token; } catch (e) { setStatus(e.message); return; }
+  await showRecipe(id);   // '공유 중지'가 보이도록 다시 그리고, 이제 링크가 있으니 다음부터는 위의 즉시 경로를 탄다
+  if (!(await send(token))) prompt('이 링크를 복사해 보내세요', link(token));
+}
+async function unshare(id) {
+  if (!confirm('공유를 중지할까요? 이미 보낸 링크는 더 이상 열리지 않습니다.')) return;
+  await api('/api/recipes/' + id + '/share', 'DELETE'); await showRecipe(id); setStatus('공유를 중지했어요');
+}
 async function delRecipe(id) { if (confirm('이 레시피를 삭제할까요?')) { await api('/api/recipes/' + id, 'DELETE'); await loadLib().catch(() => {}); location.hash = ''; } }
 
 // ---- 추출 (우측 하단 + 버튼 -> 링크 입력창)

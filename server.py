@@ -1,4 +1,4 @@
-import base64, hashlib, json, os, re, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
+import base64, hashlib, html as htmllib, json, os, re, secrets, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from html.parser import HTMLParser
@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -333,8 +333,10 @@ def fetch_webpage(url: str):
     return text, urllib.parse.urljoin(url, og[1]) if og else None
 
 
-def make_recipe(url: str):
+def make_recipe(url: str, text: str | None = None):
     """(레시피 dict, 썸네일 data URI 또는 None, (게시자 이름, 프로필 주소))"""
+    if text:  # 링크 없이 붙여넣은 레시피 글
+        return json.loads(generate(None, text).text), None, (None, None)
     with tempfile.TemporaryDirectory() as d:
         if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
             # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
@@ -570,7 +572,7 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
       data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
 
 
-for col in ("thumb", "ings", "author", "author_url", "ko_ok"):
+for col in ("thumb", "ings", "author", "author_url", "ko_ok", "share"):
     try:
         db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
     except Exception:
@@ -617,10 +619,11 @@ def by_url(url):
     return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4], "author_url": r[0][5]} if r else None
 
 
-def work(job_id: str, url: str, folder_id):
+def work(job_id: str, url: str, folder_id, text=None):
     try:
-        threading.Thread(target=preview_title, args=(job_id, url), daemon=True).start()
-        data, thumb, (author, author_url) = make_recipe(url)
+        if not text:
+            threading.Thread(target=preview_title, args=(job_id, url), daemon=True).start()
+        data, thumb, (author, author_url) = make_recipe(url, text)
         data = map_strings(data, ko_units)                      # 1) 영어 단위는 규칙으로 바로 고친다
         if en_strings(data) and data["title"].strip() != "레시피 아님":
             data = map_strings(ko_fix(data) or data, ko_units)  # 2) 영어가 남으면 AI로 한국어로 다시 쓴다
@@ -642,14 +645,18 @@ def work(job_id: str, url: str, folder_id):
 def recipe(body: dict, x_token: str | None = Header(None)):
     check(x_token)
     m = re.search(r"https?://\S+", body.get("url") or "")  # 공유 텍스트에서 링크만 추출
-    if not m:
+    text = None
+    if m:
+        url = norm(m.group(0))
+    elif len(t := (body.get("url") or "").strip()) >= 30:  # 링크가 없고 글이 충분히 길면 레시피 본문으로 본다
+        text, url = t, "text:" + hashlib.sha1(t.encode()).hexdigest()[:16]
+    else:
         raise HTTPException(400, "링크를 찾을 수 없습니다")
-    url = norm(m.group(0))
     if saved := by_url(url):
         return {"status": "done", "recipe": saved}
     job_id = new_id()
     jobs[job_id] = {"status": "pending", "url": url, "t0": time.time()}
-    threading.Thread(target=work, args=(job_id, url, body.get("folder_id")), daemon=True).start()
+    threading.Thread(target=work, args=(job_id, url, body.get("folder_id"), text), daemon=True).start()
     return {"status": "pending", "id": job_id}
 
 
@@ -685,10 +692,10 @@ def library(x_token: str | None = Header(None)):
 @app.get("/api/recipes/{rid}")
 def get_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)
-    r = db("SELECT id, data, folder_id, thumb, author, author_url FROM recipes WHERE id = ?", (rid,))
+    r = db("SELECT id, data, folder_id, thumb, author, author_url, share FROM recipes WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "레시피를 찾을 수 없습니다")
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4], "author_url": r[0][5]}
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4], "author_url": r[0][5], "share": r[0][6]}
 
 
 @app.patch("/api/recipes/{rid}")
@@ -696,6 +703,86 @@ def move_recipe(rid: str, body: dict, x_token: str | None = Header(None)):
     check(x_token)
     db("UPDATE recipes SET folder_id = ? WHERE id = ?", (body.get("folder_id") or None, rid))
     return {}
+
+
+@app.post("/api/recipes/{rid}/share")
+def share_on(rid: str, x_token: str | None = Header(None)):
+    """공유 링크용 토큰을 만든다(이미 있으면 그대로). 링크는 클라이언트가 {origin}/s/{token}으로 조립한다."""
+    check(x_token)
+    r = db("SELECT share FROM recipes WHERE id = ?", (rid,))
+    if not r:
+        raise HTTPException(404, "레시피를 찾을 수 없습니다")
+    token = r[0][0] or secrets.token_urlsafe(9)  # 12자, 추측 불가
+    db("UPDATE recipes SET share = ? WHERE id = ?", (token, rid))
+    return {"token": token}
+
+
+@app.delete("/api/recipes/{rid}/share")
+def share_off(rid: str, x_token: str | None = Header(None)):
+    check(x_token)
+    db("UPDATE recipes SET share = NULL WHERE id = ?", (rid,))
+    return {}
+
+
+def safe_link(u):  # 공개 페이지에 넣는 링크는 http(s)만 (javascript: 같은 주소 차단)
+    return u if isinstance(u, str) and re.match(r"https?://", u) else None
+
+
+SHARE_CSS = """:root{color-scheme:light}*{box-sizing:border-box}body{margin:0 auto;max-width:640px;padding:20px 20px 60px;background:#fff;color:#2b35ff;
+font:400 18px/1.5 "Helvetica Neue",Helvetica,Arial,"Apple SD Gothic Neo",sans-serif;letter-spacing:-.01em;word-break:keep-all;overflow-wrap:break-word}
+a{color:inherit}.r{border-top:1px solid #2b35ff;padding:12px 0}.dim{color:rgba(43,53,255,.55)}.c2{display:grid;grid-template-columns:25% 1fr;gap:16px}
+.c3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}.head{display:grid;grid-template-columns:56px 1fr;gap:14px;align-items:center;padding:4px 0 18px}
+.th{width:56px;height:56px;object-fit:cover;display:block}.title{font-weight:600}.list>span{display:block;margin-bottom:3px}.step{display:grid;grid-template-columns:28px 1fr;gap:6px;margin:0 0 14px}"""
+
+
+def share_page(rid: str, d: dict, has_thumb: bool, token: str) -> str:
+    e = lambda v: htmllib.escape(str(v if v is not None else ""))
+    n, steps = 0, []
+    for sec in d.get("sections", []):
+        body = ""
+        for st in sec["steps"]:
+            n += 1
+            sub = " · ".join(f"{i['name']} {i['amount']}" for i in st.get("ingredients", []))
+            body += f'<p class="step"><span class="dim">{n}</span><span>{e(st["text"])}{f"<br><span class=dim>{e(sub)}</span>" if sub else ""}</span></p>'
+        steps.append(f'<div class="r"><div class="dim" style="margin-bottom:10px">{e(sec["title"])}</div>{body}</div>')
+    ings = "".join(f'<span>{e(i["name"])} <span class="dim">{e(i["amount"])}</span></span>' for i in d.get("ingredients", []))
+    tips = "".join(f"<span>{e(t)}</span>" for t in d.get("tips", []))
+    origin, author_url = safe_link(d.get("url")), safe_link(d.get("author_url"))
+    author = d.get("author")
+    author_html = (f'<a class="dim" href="{e(author_url)}" rel="noopener noreferrer">{e(author)}</a>' if author and author_url else f'<div class="dim">{e(author)}</div>' if author else "")
+    desc = f"재료: {', '.join(i['name'] for i in d.get('ingredients', [])[:8])}"
+    img = f'<img class="th" src="/s/{e(token)}/thumb.jpg" alt="">' if has_thumb else ""
+    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer"><title>{e(d['title'])}</title>
+<meta property="og:title" content="{e(d['title'])}"><meta property="og:description" content="{e(desc)}"><meta property="og:type" content="article">
+{f'<meta property="og:image" content="/s/{e(token)}/thumb.jpg">' if has_thumb else ''}<style>{SHARE_CSS}</style></head><body>
+<div class="head">{img}<div><div class="title">{e(d['title'])}</div>{author_html}</div></div>
+<div class="r c3"><div><div class="dim">분량</div><div>{e(d.get('servings'))}</div></div><div><div class="dim">시간</div><div>{e(d.get('minutes'))}분</div></div>
+<div><div class="dim">원본</div>{f'<a href="{e(origin)}" rel="noopener noreferrer">열기 ↗</a>' if origin else '<div>-</div>'}</div></div>
+<div class="r c2"><div class="dim">재료</div><div class="list">{ings}</div></div>{''.join(steps)}
+{f'<div class="r c2"><div class="dim">팁</div><div class="list">{tips}</div></div>' if tips else ''}
+<div class="r dim" style="font-size:18px">공유된 레시피 · 읽기 전용</div></body></html>"""
+
+
+NO_INDEX = {"X-Robots-Tag": "noindex, nofollow", "Referrer-Policy": "no-referrer", "Cache-Control": "no-store"}
+
+
+@app.get("/s/{token}")
+def shared(token: str):
+    """공유 링크: 로그인·접근 토큰 없이 그 레시피 하나만 읽기 전용으로 보여준다."""
+    r = db("SELECT id, data, thumb FROM recipes WHERE share = ?", (token,)) if re.fullmatch(r"[\w-]{8,32}", token) else []
+    if not r:
+        return HTMLResponse("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=robots content=noindex>"
+                            "<body style='font:18px/1.5 sans-serif;color:#2b35ff;padding:20px'>공유가 중지되었거나 없는 레시피입니다.</body>", status_code=404, headers=NO_INDEX)
+    return HTMLResponse(share_page(r[0][0], json.loads(r[0][1]), bool(r[0][2]), token), headers=NO_INDEX)
+
+
+@app.get("/s/{token}/thumb.jpg")
+def shared_thumb(token: str):
+    r = db("SELECT thumb FROM recipes WHERE share = ?", (token,)) if re.fullmatch(r"[\w-]{8,32}", token) else []
+    if not r or not r[0][0]:
+        raise HTTPException(404)
+    return Response(base64.b64decode(r[0][0].split(",", 1)[1]), media_type="image/jpeg", headers=NO_INDEX)
 
 
 @app.delete("/api/recipes/{rid}")
