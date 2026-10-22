@@ -803,6 +803,26 @@ def shared_thumb(token: str):
     return Response(base64.b64decode(r[0][0].split(",", 1)[1]), media_type="image/jpeg", headers=NO_INDEX)
 
 
+@app.post("/api/recipes/bulk")
+def bulk(body: dict, x_token: str | None = Header(None)):
+    """여러 레시피를 한 번에 이동/삭제. body: {ids:[...], action:'move'|'delete', folder_id: 폴더 id 또는 null(분류 안 됨)}"""
+    check(x_token)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids or len(ids) > 500 or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(400, "선택한 레시피가 올바르지 않습니다")
+    marks = ",".join("?" * len(ids))
+    if body.get("action") == "delete":
+        db(f"DELETE FROM recipes WHERE id IN ({marks})", tuple(ids))
+    elif body.get("action") == "move":
+        fid = body.get("folder_id") or None
+        if fid and not db("SELECT 1 FROM folders WHERE id = ?", (fid,)):
+            raise HTTPException(400, "없는 폴더입니다")
+        db(f"UPDATE recipes SET folder_id = ? WHERE id IN ({marks})", (fid, *ids))
+    else:
+        raise HTTPException(400, "알 수 없는 작업입니다")
+    return {}
+
+
 @app.delete("/api/recipes/{rid}")
 def delete_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)

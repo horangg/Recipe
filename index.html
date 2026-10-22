@@ -55,6 +55,14 @@
   #sheet[hidden] { display:none; }
   #sheet form { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:end; }
   .detail #q, .detail #fab { display:none; }
+  /* 편집(여러 개 선택) */
+  .item.sel { grid-template-columns:20px 56px 1fr; cursor:pointer; }
+  .box { width:20px; height:20px; border:1px solid var(--fg); }
+  .box.on { background:var(--fg); }
+  .gh { all:unset; cursor:pointer; display:grid; grid-template-columns:1fr auto; gap:16px; width:100%; box-sizing:border-box; border-top:1px solid var(--fg); padding:12px 0; }
+  #bar { position:fixed; left:0; right:0; bottom:0; margin:0 auto; max-width:640px; background:var(--bg); border-top:1px solid var(--fg); padding:12px 20px calc(12px + env(safe-area-inset-bottom)); z-index:6; display:flex; gap:16px; align-items:center; justify-content:space-between; }
+  #bar[hidden] { display:none; }
+  .editing #fab { display:none; }
 </style>
 </head>
 <body>
@@ -63,6 +71,7 @@
 <div id="status" class="dim"></div>
 <div id="main"></div>
 <div id="end" aria-hidden="true"></div>
+<div id="bar" hidden></div>
 
 <button id="fab" aria-label="레시피 추가" onclick="openSheet()"></button>
 <div id="sheet" hidden>
@@ -130,29 +139,71 @@ async function showList() {
   if (lib.jobs.some(j => j.status === 'pending')) timer = setTimeout(() => !location.hash && showList(), 4000);
 }
 
+// ---- 편집 모드(여러 개 선택) / 폴더 접기
+let editing = false, sel = new Set();
+let collapsed = new Set(JSON.parse(store.get('collapsed') || '[]'));   // 접어 둔 그룹 (폴더 id, 'none' = 분류 안 됨)
+const fname = id => (lib.folders.find(f => f.id === id) || {}).name;
+
+function row(r, sub) {
+  const body = `${thumb(r.thumb)}<span>${esc(r.title)}${sub}</span>`;
+  return editing ? `<div class="r item sel" onclick="toggleSel('${r.id}')"><span class="box ${sel.has(r.id) ? 'on' : ''}"></span>${body}</div>`
+                 : `<a class="r item" href="#r/${r.id}">${body}</a>`;
+}
+function toggleGroup(id) { collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); store.set('collapsed', JSON.stringify([...collapsed])); renderList(); }
+function toggleEdit() { editing = !editing; sel.clear(); renderList(); }
+function toggleSel(id) { sel.has(id) ? sel.delete(id) : sel.add(id); renderList(); }
+function selectAll(ids) { const all = ids.every(i => sel.has(i)); ids.forEach(i => all ? sel.delete(i) : sel.add(i)); renderList(); }
+
+function renderBar() {
+  document.body.classList.toggle('editing', editing);
+  $('bar').hidden = !editing;
+  if (!editing) return;
+  $('bar').innerHTML = `<span>${sel.size}개 선택</span>
+    <select ${sel.size ? '' : 'disabled'} onchange="bulkMove(this.value); this.value=''"><option value="">폴더로 이동</option><option value="none">분류 안 됨</option>${lib.folders.map(f => `<option value="${f.id}">${esc(f.name)}</option>`).join('')}</select>
+    <button class="txt" ${sel.size ? '' : 'disabled'} onclick="bulkDelete()">삭제</button>`;
+}
+async function bulk(action, folder_id) {
+  const ids = [...sel]; if (!ids.length) return;
+  try { await api('/api/recipes/bulk', 'POST', { ids, action, folder_id }); } catch (e) { setStatus(e.message); return; }
+  sel.clear(); await loadLib().catch(() => {}); renderList();
+  setStatus(action === 'delete' ? `${ids.length}개를 삭제했어요` : `${ids.length}개를 옮겼어요`);
+}
+const bulkMove = v => v && bulk('move', v === 'none' ? null : v);
+function bulkDelete() { if (sel.size && confirm(`선택한 ${sel.size}개 레시피를 삭제할까요? 되돌릴 수 없어요.`)) bulk('delete'); }
+
 function renderList() {
-  const fname = id => (lib.folders.find(f => f.id === id) || {}).name;
+  for (const id of [...sel]) if (!lib.recipes.some(r => r.id === id)) sel.delete(id);   // 사라진 항목은 선택 해제
+  if (editing && !lib.recipes.length) editing = false;   // 전부 지웠으면 편집 종료
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const bar = ids => (ids.length || editing) ? `<div class="r ra"><span class="dim">${editing ? '' : ids.length + '개'}</span><span>${editing ? `<button class="txt" onclick='selectAll(${JSON.stringify(ids)})'>전체 선택</button> &nbsp; ` : ''}<button class="txt" onclick="toggleEdit()">${editing ? '완료' : '편집'}</button></span></div>` : '';
   if (terms.length) {  // 검색: 폴더와 상관없이 전체에서 제목/재료로 찾는다 (여러 단어는 모두 포함)
     const hits = lib.recipes.filter(r => terms.every(t => (r.title + '|' + (r.ings || '') + '|' + (r.author || '')).toLowerCase().includes(t)));
-    $('main').innerHTML = hits.length ? hits.map(r => {
+    $('main').innerHTML = hits.length ? bar(hits.map(r => r.id)) + hits.map(r => {
       const hint = (r.ings || '').split('|').filter(n => terms.some(t => n.toLowerCase().includes(t) && !r.title.toLowerCase().includes(t)));
-      return `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${subline([r.author, r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : ''])}</span></a>`;
-    }).join('') : '<div class="r dim">검색 결과가 없습니다.</div>';
-    return;
+      return row(r, subline([r.author, r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : '']));
+    }).join('') : bar([]) + '<div class="r dim">검색 결과가 없습니다.</div>';
+    renderBar(); return;
   }
   const shown = lib.recipes.filter(r => cur === 'all' || (cur === 'none' ? !r.folder_id : r.folder_id === cur));
   const opt = (id, label, n) => `<button class="txt ${cur === id ? 'on' : ''}" style="text-decoration:none" onclick="setCur('${id}')">${esc(label)} <span class="dim">${n}</span></button>`;
   const count = id => lib.recipes.filter(r => id === 'none' ? !r.folder_id : r.folder_id === id).length;  // 폴더별 레시피 수
   const inFolder = cur.length > 4;
+  let list;
+  if (!shown.length) list = '<div class="r dim">저장된 레시피가 없습니다. 우측 하단 + 버튼으로 링크를 추가해 보세요.</div>';
+  else if (cur === 'all') {   // 전체: 폴더별로 묶어서 접었다 펼 수 있게
+    const groups = [...lib.folders.map(f => [f.id, f.name]), ['none', '분류 안 됨']]
+      .map(([id, name]) => [id, name, shown.filter(r => id === 'none' ? !r.folder_id : r.folder_id === id)]).filter(g => g[2].length);
+    list = groups.map(([id, name, rs]) => `<button class="gh" onclick="toggleGroup('${id}')"><span>${collapsed.has(id) ? '▸' : '▾'} ${esc(name)}</span><span class="dim">${rs.length}</span></button>`
+      + (collapsed.has(id) ? '' : rs.map(r => row(r, subline([r.author]))).join(''))).join('');
+  } else list = shown.map(r => row(r, subline([r.author]))).join('');
   $('main').innerHTML = `
     <div class="r c2"><div class="dim">폴더</div>
       <div class="list cols2">${opt('all', '전체', lib.recipes.length)}${opt('none', '분류 안 됨', count('none'))}${lib.folders.map(f => opt(f.id, f.name, count(f.id))).join('')}
         <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
     ${inFolder && fname(cur) ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
-    ${shown.length ? shown.map(r => `<a class="r item" href="#r/${r.id}">${thumb(r.thumb)}<span>${esc(r.title)}${subline([r.author, cur === 'all' && r.folder_id ? fname(r.folder_id) : ''])}</span></a>`).join('')
-      : '<div class="r dim">저장된 레시피가 없습니다. 우측 하단 + 버튼으로 링크를 추가해 보세요.</div>'}`;
+    ${bar(shown.map(r => r.id))}${list}`;
+  renderBar();
 }
 function setCur(id) { cur = id; store.set('cur', id); renderList(); }
 async function addFolder() { const name = prompt('새 폴더 이름'); if (!name) return; const f = await api('/api/folders', 'POST', { name }); await loadLib(); setCur(f.id); }
@@ -232,6 +283,7 @@ async function go(url) {
 function route() {
   const m = /^#r\/(\w+)/.exec(location.hash);
   document.body.classList.toggle('detail', !!m);
+  if (m) { editing = false; sel.clear(); renderBar(); }
   m ? showRecipe(m[1]) : showList();
 }
 addEventListener('hashchange', route);
