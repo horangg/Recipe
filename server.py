@@ -469,6 +469,22 @@ def ko_fix(data: dict):
     return None
 
 
+def auto_folder(data: dict):
+    """기존 폴더 중 가장 알맞은 폴더 id. 애매하거나 폴더가 없거나 AI가 실패하면 None(분류 안 됨)."""
+    folders = db("SELECT id, name FROM folders ORDER BY name")
+    if not folders:
+        return None
+    names = [n for _, n in folders]
+    ings = ", ".join(i["name"] for i in data.get("ingredients", [])[:10])
+    ans = one_line(ask("다음 요리를 아래 폴더 중 가장 알맞은 하나로 분류해라. 확실히 맞는 폴더가 없으면 '없음'이라고만 답해라. "
+                       "폴더 이름만 정확히 한 줄로 답하고 설명은 쓰지 마라.\n"
+                       f"폴더: {' / '.join(names)}\n요리: {data['title']}\n재료: {ings}"))
+    for fid, n in folders:  # 목록에 있는 이름과 정확히 일치할 때만 인정 (AI가 지어낸 폴더는 무시)
+        if ans == n:
+            return fid
+    return None
+
+
 def ko_title(data: dict):
     """레시피 내용을 근거로 한국어 요리 이름을 만든다. 못 만들면 None."""
     ings = ", ".join(i["name"] for i in data.get("ingredients", [])[:8])
@@ -632,6 +648,8 @@ def work(job_id: str, url: str, folder_id, text=None):
         if data["title"].strip() == "레시피 아님":  # 프롬프트가 요리와 무관한 콘텐츠에 쓰라고 한 표식 — 저장하지 않는다
             raise HTTPException(422, "요리 레시피가 아닌 콘텐츠로 보여 저장하지 않았습니다")
         data["url"] = url
+        if not folder_id and data["title"].strip() != "레시피 아님":
+            folder_id = auto_folder(data)  # 폴더를 직접 고르지 않았으면 기존 폴더 중에서 자동 분류
         db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url, ko_ok) VALUES (?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT (url) DO NOTHING",
            (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url))
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
