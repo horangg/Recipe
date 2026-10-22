@@ -59,7 +59,6 @@
   .item.sel { grid-template-columns:20px 56px 1fr; cursor:pointer; }
   .box { width:20px; height:20px; border:1px solid var(--fg); }
   .box.on { background:var(--fg); }
-  .gh { all:unset; cursor:pointer; display:grid; grid-template-columns:1fr auto; gap:16px; width:100%; box-sizing:border-box; border-top:1px solid var(--fg); padding:12px 0; }
   #bar { position:fixed; left:0; right:0; bottom:0; margin:0 auto; max-width:640px; background:var(--bg); border-top:1px solid var(--fg); padding:12px 20px calc(12px + env(safe-area-inset-bottom)); z-index:6; display:flex; gap:16px; align-items:center; justify-content:space-between; }
   #bar[hidden] { display:none; }
   .editing #fab { display:none; }
@@ -141,7 +140,7 @@ async function showList() {
 
 // ---- 편집 모드(여러 개 선택) / 폴더 접기
 let editing = false, sel = new Set();
-let collapsed = new Set(JSON.parse(store.get('collapsed') || '[]'));   // 접어 둔 그룹 (폴더 id, 'none' = 분류 안 됨)
+let foldersOpen = store.get('foldersOpen') !== '0';   // 폴더 영역 펼침 여부
 const fname = id => (lib.folders.find(f => f.id === id) || {}).name;
 
 function row(r, sub) {
@@ -149,7 +148,7 @@ function row(r, sub) {
   return editing ? `<div class="r item sel" onclick="toggleSel('${r.id}')"><span class="box ${sel.has(r.id) ? 'on' : ''}"></span>${body}</div>`
                  : `<a class="r item" href="#r/${r.id}">${body}</a>`;
 }
-function toggleGroup(id) { collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); store.set('collapsed', JSON.stringify([...collapsed])); renderList(); }
+function toggleFolders() { foldersOpen = !foldersOpen; store.set('foldersOpen', foldersOpen ? '1' : '0'); renderList(); }
 function toggleEdit() { editing = !editing; sel.clear(); renderList(); }
 function toggleSel(id) { sel.has(id) ? sel.delete(id) : sel.add(id); renderList(); }
 function selectAll(ids) { const all = ids.every(i => sel.has(i)); ids.forEach(i => all ? sel.delete(i) : sel.add(i)); renderList(); }
@@ -190,16 +189,12 @@ function renderList() {
   const inFolder = cur.length > 4;
   let list;
   if (!shown.length) list = '<div class="r dim">저장된 레시피가 없습니다. 우측 하단 + 버튼으로 링크를 추가해 보세요.</div>';
-  else if (cur === 'all') {   // 전체: 폴더별로 묶어서 접었다 펼 수 있게
-    const groups = [...lib.folders.map(f => [f.id, f.name]), ['none', '분류 안 됨']]
-      .map(([id, name]) => [id, name, shown.filter(r => id === 'none' ? !r.folder_id : r.folder_id === id)]).filter(g => g[2].length);
-    list = groups.map(([id, name, rs]) => `<button class="gh" onclick="toggleGroup('${id}')"><span>${collapsed.has(id) ? '▸' : '▾'} ${esc(name)}</span><span class="dim">${rs.length}</span></button>`
-      + (collapsed.has(id) ? '' : rs.map(r => row(r, subline([r.author]))).join(''))).join('');
-  } else list = shown.map(r => row(r, subline([r.author]))).join('');
+  else list = shown.map(r => row(r, subline([r.author, cur === 'all' && r.folder_id ? fname(r.folder_id) : '']))).join('');
   $('main').innerHTML = `
-    <div class="r c2"><div class="dim">폴더</div>
-      <div class="list cols2">${opt('all', '전체', lib.recipes.length)}${opt('none', '분류 안 됨', count('none'))}${lib.folders.map(f => opt(f.id, f.name, count(f.id))).join('')}
-        <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div></div>
+    <div class="r c2"><div><button class="txt dim" style="text-decoration:none" onclick="toggleFolders()">${foldersOpen ? '▾' : '▸'} 폴더</button></div>
+      ${foldersOpen ? `<div class="list cols2">${opt('all', '전체', lib.recipes.length)}${opt('none', '분류 안 됨', count('none'))}${lib.folders.map(f => opt(f.id, f.name, count(f.id))).join('')}
+        <button class="txt dim" style="text-decoration:none" onclick="addFolder()">+ 폴더</button></div>`
+      : `<div>${cur === 'all' ? '전체' : cur === 'none' ? '분류 안 됨' : esc(fname(cur) || '전체')} <span class="dim">${cur === 'all' ? lib.recipes.length : count(cur)}</span></div>`}</div>
     ${inFolder && fname(cur) ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
     ${bar(shown.map(r => r.id))}${list}`;
