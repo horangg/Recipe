@@ -94,7 +94,9 @@ UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.1
 
 
 def http_get(u):
-    return urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": UA}), timeout=30)
+    return urllib.request.urlopen(urllib.request.Request(u, headers={
+        "User-Agent": UA, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"}), timeout=30)
 
 
 @lru_cache(maxsize=32)  # 한 번의 추출에서 같은 페이지를 여러 번(커버·게시자·종류 판별) 읽으므로 캐시
@@ -376,15 +378,20 @@ def gemini_read_page(url: str) -> str:
     """사이트가 우리 서버(Render)의 접속을 막을 때: Google 서버가 대신 페이지를 읽게 한다(Gemini URL 도구). 못 읽으면 ''."""
     prompt = ("다음 페이지의 요리 레시피(제목, 분량, 재료와 분량 전부, 조리 순서 전부, 팁)를 원문 그대로 빠짐없이 옮겨 적어라. "
               f"요약하거나 지어내지 마라. 페이지를 못 읽거나 레시피가 없으면 READ_FAILED 한 단어만 답해라.\n{url}")
+    busy = False
     for model in MODELS:
         try:
             r = client.models.generate_content(model=model, contents=prompt,
                                                config=types.GenerateContentConfig(tools=[types.Tool(url_context=types.UrlContext())]))
+            log_usage("page", model, r)
             prefer(model)
             t = (r.text or "").strip()
             return "" if "READ_FAILED" in t[:40] else t
         except genai.errors.APIError as e:
+            busy = busy or e.code in (429, 503)
             print("gemini_read_page failed:", model, e.code, flush=True)
+    if busy:  # 한도 초과/과부하 때문에 읽어 보지도 못했다 -> '본문 없음'으로 오해하지 말고 대기열로
+        raise Busy("Gemini 한도 초과 또는 과부하")
     return ""
 
 
@@ -437,7 +444,8 @@ def make_recipe(url: str, text: str | None = None):
                 text, img = fetch_webpage(url)
             except Exception as e2:
                 text, img, page_err = "", None, f"웹 페이지 읽기 실패: {e2}"
-            if len(text) < 200:  # 직접 읽기가 막혔거나 비었으면 Google 서버로 읽어 본다
+            direct = len(text)
+            if len(text) < 200:  # 직접 읽기가 막혔거나 비었으면 Google 서버로 읽어 본다 (한도면 Busy -> 대기열)
                 text = gemini_read_page(url)
                 if len(text) >= 200:
                     print("page read via gemini url tool", flush=True)
@@ -454,7 +462,7 @@ def make_recipe(url: str, text: str | None = None):
             try:  # 본문이 없으면 페이지에 영상이 있는지 시도
                 video, caption = fetch(url, d)
             except HTTPException as e:
-                raise HTTPException(502, f"{page_err or '페이지에서 읽을 수 있는 본문이 거의 없습니다 (로그인이 필요하거나, 스크립트로 그리는 페이지이거나, 사이트가 서버 접속을 막았을 수 있어요)'} | 영상도 찾지 못했습니다: {e.detail}")
+                raise HTTPException(502, f"{page_err or '페이지에서 읽을 수 있는 본문이 거의 없습니다 (로그인이 필요하거나, 스크립트로 그리는 페이지이거나, 사이트가 서버 접속을 막았을 수 있어요)'} [직접 읽기 {direct}자, Google 읽기 {len(text)}자] | 영상도 찾지 못했습니다: {e.detail}")
         else:
             video, caption = fetch(url, d)
         caption = with_comments(url, caption)
