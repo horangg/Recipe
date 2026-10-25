@@ -915,7 +915,7 @@ def index():
 
 @app.get("/version")
 def version():
-    return {"v": BUILD}
+    return {"v": BUILD, "commit": os.environ.get("RENDER_GIT_COMMIT", "")[:7]}  # 배포된 커밋 (Render가 넣어 준다) — 코드가 실제로 반영됐는지 확인용
 
 
 @app.get("/manifest.json")
