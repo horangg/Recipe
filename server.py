@@ -610,6 +610,12 @@ def preview_title(job_id: str, url: str):
         jobs[job_id]["title"] = dish
 
 
+class Busy(HTTPException):
+    """Gemini 한도 초과(429)·과부하(503): 시간이 지나면 풀리는 실패. 버리지 않고 대기열에 넣어 나중에 다시 한다."""
+    def __init__(self, detail):
+        super().__init__(503, detail)
+
+
 def generate(f, caption, low_res=False):
     """f: 영상 파일 / 이미지 Part 목록 / None(글만). low_res: 영상 프레임 해상도를 낮춰 토큰을 줄인다(음성 중심 영상용)."""
     media = [] if f is None else f if isinstance(f, list) else [f]
@@ -629,6 +635,8 @@ def generate(f, caption, low_res=False):
             except genai.errors.APIError as e:
                 err = e
         time.sleep(3 * (attempt + 1))
+    if err.code in (429, 503):
+        raise Busy(f"Gemini 한도 초과 또는 과부하 ({err.code})")
     raise HTTPException(502, f"Gemini 오류 {err.code}: {err.message[:200]}")
 
 
@@ -675,6 +683,7 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
       data TEXT NOT NULL, folder_id TEXT, created TEXT NOT NULL)""")
 
 
+db("""CREATE TABLE IF NOT EXISTS queue (id TEXT PRIMARY KEY, url TEXT UNIQUE NOT NULL, folder_id TEXT, body TEXT, title TEXT, created TEXT NOT NULL)""")
 for col in ("thumb", "ings", "author", "author_url", "ko_ok", "share"):
     try:
         db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
@@ -722,28 +731,74 @@ def by_url(url):
     return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5]} if r else None
 
 
+def save_recipe(url: str, folder_id, text=None):
+    """추출해서 저장한다. 한도 때문에 못 하면 Busy, 그 밖의 실패는 HTTPException/예외."""
+    data, thumb, (author, author_url) = make_recipe(url, text)
+    data = map_strings(data, ko_units)                      # 1) 영어 단위는 규칙으로 바로 고친다
+    if en_strings(data) and data["title"].strip() != "레시피 아님":
+        data = map_strings(ko_fix(data) or data, ko_units)  # 2) 영어가 남으면 AI로 한국어로 다시 쓴다
+    if needs_ko(data["title"]) and data["title"].strip() != "레시피 아님":
+        data["title"] = ko_title(data) or data["title"]     # 3) 제목은 따로 한 번 더
+    if data["title"].strip() == "레시피 아님":  # 프롬프트가 요리와 무관한 콘텐츠에 쓰라고 한 표식 — 저장하지 않는다
+        raise HTTPException(422, "요리 레시피가 아닌 콘텐츠로 보여 저장하지 않았습니다")
+    data["url"] = url
+    if not folder_id:
+        folder_id = auto_folder(data)  # 폴더를 직접 고르지 않았으면 기존 폴더 중에서 자동 분류
+    clean = not en_strings(data) and not needs_ko(data["title"])  # 한도 탓에 한국어 정리를 못 했으면 표시하지 않고, 나중에 fix_korean이 다시 한다
+    db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url, ko_ok) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+       (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url, 1 if clean else None))
+
+
 def work(job_id: str, url: str, folder_id, text=None):
     try:
         if not text:
             threading.Thread(target=preview_title, args=(job_id, url), daemon=True).start()
-        data, thumb, (author, author_url) = make_recipe(url, text)
-        data = map_strings(data, ko_units)                      # 1) 영어 단위는 규칙으로 바로 고친다
-        if en_strings(data) and data["title"].strip() != "레시피 아님":
-            data = map_strings(ko_fix(data) or data, ko_units)  # 2) 영어가 남으면 AI로 한국어로 다시 쓴다
-        if needs_ko(data["title"]) and data["title"].strip() != "레시피 아님":
-            data["title"] = ko_title(data) or data["title"]     # 3) 제목은 따로 한 번 더
-        if data["title"].strip() == "레시피 아님":  # 프롬프트가 요리와 무관한 콘텐츠에 쓰라고 한 표식 — 저장하지 않는다
-            raise HTTPException(422, "요리 레시피가 아닌 콘텐츠로 보여 저장하지 않았습니다")
-        data["url"] = url
-        if not folder_id and data["title"].strip() != "레시피 아님":
-            folder_id = auto_folder(data)  # 폴더를 직접 고르지 않았으면 기존 폴더 중에서 자동 분류
-        db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url, ko_ok) VALUES (?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT (url) DO NOTHING",
-           (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url))
+        save_recipe(url, folder_id, text)
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
+    except Busy:  # 한도 초과: 실패로 끝내지 않고 대기열에 저장 -> 서버가 한도가 풀릴 때쯤 자동으로 다시 시도
+        qid = new_id()
+        db("INSERT INTO queue (id, url, folder_id, body, title, created) VALUES (?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+           (qid, url, folder_id, text, jobs[job_id].get("title"), now()))
+        jobs[job_id].update(status="waiting")
     except HTTPException as e:
         jobs[job_id].update(status="error", error=e.detail)
     except Exception as e:  # ponytail: 예상 못 한 오류도 화면에 보이게만 함
         jobs[job_id].update(status="error", error=f"{type(e).__name__}: {e}")
+
+
+QUEUE_MAX_AGE = 3 * 86400  # 3일 넘게 못 한 건 포기한다
+
+
+def queue_worker():
+    """대기열을 주기적으로 다시 시도한다. 계속 한도에 걸리면 간격을 5분 -> 10분 -> ... -> 최대 60분으로 늘린다.
+    한도(분당)는 금방, 하루 한도는 태평양 시간 자정(한국 오후 4~5시)에 풀린다. ponytail: Render 무료 서버가 잠들면 이 루프도 멈추고, 깨어나면 이어서 한다."""
+    wait = 300
+    while True:
+        time.sleep(wait)
+        try:
+            fix_korean()  # 한도 때문에 영어로 남은 레시피도 이때 같이 고친다
+            for qid, url, folder_id, body, title, created in db("SELECT id, url, folder_id, body, title, created FROM queue ORDER BY created LIMIT 5"):
+                if (datetime.now(timezone.utc) - datetime.fromisoformat(created)).total_seconds() > QUEUE_MAX_AGE:
+                    db("DELETE FROM queue WHERE id = ?", (qid,))
+                    jobs["q" + qid] = {"status": "error", "url": url, "title": title, "error": "3일 동안 한도가 풀리지 않아 포기했어요. 다시 추가해 주세요"}
+                    continue
+                try:
+                    save_recipe(url, folder_id, body)
+                    db("DELETE FROM queue WHERE id = ?", (qid,))
+                    print("queue: saved", url, flush=True)
+                    wait = 300
+                except Busy:
+                    wait = min(wait * 2, 3600)
+                    print(f"queue: still busy, next try in {wait}s", flush=True)
+                    break
+                except Exception as e:  # 한도 문제가 아닌 실패는 다시 해도 소용없다 -> 대기열에서 빼고 오류로 보여준다
+                    db("DELETE FROM queue WHERE id = ?", (qid,))
+                    jobs["q" + qid] = {"status": "error", "url": url, "title": title, "error": getattr(e, "detail", None) or f"{type(e).__name__}: {e}"}
+        except Exception as e:
+            print("queue_worker error:", e, flush=True)
+
+
+threading.Thread(target=queue_worker, daemon=True).start()
 
 
 @app.post("/api/recipe")
@@ -777,6 +832,8 @@ def job(job_id: str, x_token: str | None = Header(None)):
 def dismiss(job_id: str, x_token: str | None = Header(None)):
     check(x_token)
     jobs.pop(job_id, None)
+    if job_id.startswith("q"):
+        db("DELETE FROM queue WHERE id = ?", (job_id[1:],))  # 대기 중인 건 취소
     return {}
 
 
@@ -790,7 +847,8 @@ def library(x_token: str | None = Header(None)):
         "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": bool(r[3]), "ings": r[4], "author": r[5]}
                     for r in db("SELECT id, title, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, ings, author FROM recipes ORDER BY created DESC")],
         "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error", "title") if x in v}}
-                 for k, v in jobs.items() if v["status"] != "done"],
+                 for k, v in jobs.items() if v["status"] not in ("done", "waiting")]
+                + [{"id": "q" + r[0], "status": "waiting", "url": r[1], "title": r[2]} for r in db("SELECT id, url, title FROM queue ORDER BY created")],
     }
 
 

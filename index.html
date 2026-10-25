@@ -117,7 +117,9 @@ async function loadLib() {
 }
 
 function renderJobs() {
-  $('jobs').innerHTML = lib.jobs.map(j => j.status === 'error'
+  $('jobs').innerHTML = lib.jobs.map(j => j.status === 'waiting'
+    ? `<div class="r ra"><div class="clip">대기 중 · ${esc(j.title || '한도 초과')}<br><span class="dim">Gemini 한도가 풀리면 자동으로 이어서 해요</span></div><button class="txt" onclick="dismiss('${j.id}')">취소</button></div>`
+    : j.status === 'error'
     ? `<div class="r ra"><div><b>실패</b> ${esc(j.error)}</div><button class="txt" onclick="dismiss('${j.id}')">닫기</button></div>`
     : `<div class="r c2"><div>분석 중…</div><div class="dim clip">${esc(j.title || '')}</div></div>`).join('');
 }
@@ -136,6 +138,7 @@ async function showList() {
   if (cur !== 'all' && cur !== 'none' && !lib.folders.some(f => f.id === cur)) cur = 'all';
   renderList();
   if (lib.jobs.some(j => j.status === 'pending')) timer = setTimeout(() => !location.hash && showList(), 4000);
+  else if (lib.jobs.some(j => j.status === 'waiting')) timer = setTimeout(() => !location.hash && showList(), 60000);   // 대기열은 1분마다 확인
 }
 
 // ---- 편집 모드(여러 개 선택) / 폴더 접기
@@ -269,6 +272,7 @@ async function go(url) {
       d = await api('/api/job/' + id);
       if (d.status === 'pending') banner(d.title);
     }
+    if (d.status === 'waiting') { $('jobs').innerHTML = ''; await loadLib().catch(() => {}); setStatus('한도가 차서 대기열에 넣었어요. 풀리면 자동으로 이어서 해요'); $('fab').disabled = false; return; }
     if (d.status === 'error') throw new Error(d.error);
     $('u').value = ''; $('jobs').innerHTML = ''; await loadLib().catch(() => {}); location.hash = '#r/' + d.recipe.id; route();
   } catch (e) { $('jobs').innerHTML = `<div class="r"><b>실패</b> ${esc(e.message)}</div>`; }
