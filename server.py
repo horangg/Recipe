@@ -247,6 +247,21 @@ def thumb_for(url: str, d: str):
 QTY = re.compile(r"\d+(?:[./]\d+)?\s*(?:(?:kg|g|ml|l|cc|oz|tsp|tbsp|cups?)(?![a-zA-Z])|컵|큰술|작은술|스푼|숟가락|개|쪽|그램|리터)", re.I)
 
 
+VIDEO_ALWAYS = os.environ.get("VIDEO_ALWAYS") == "1"  # 1이면 본문에 레시피가 있어도 항상 영상까지 분석 (정확도 우선, 토큰 많이 씀)
+
+
+def strong_recipe(text: str) -> bool:
+    """본문만으로 레시피가 충분한가: 분량 표현이 5개 이상이고 200자 이상. 그러면 영상·사진을 AI에 보내지 않고 글만 보낸다(토큰 대폭 절약)."""
+    return not VIDEO_ALWAYS and len(text or "") >= 200 and len(QTY.findall(text)) >= 5
+
+
+def log_usage(label: str, model: str, r):
+    """호출마다 쓴 토큰을 로그로 남긴다 (Render Logs에서 'tokens'로 검색)."""
+    u = getattr(r, "usage_metadata", None)
+    if u:
+        print(f"tokens {label} {model}: in={u.prompt_token_count} out={u.candidates_token_count} think={u.thoughts_token_count}", flush=True)
+
+
 def has_recipe(text: str) -> bool:
     """본문에 레시피가 있는지 가늠: '500g', '2큰술' 같은 분량 표현이 3개 이상이면 있다고 본다."""
     return len(QTY.findall(text or "")) >= 3
@@ -263,7 +278,7 @@ def ytdlp_json(url: str, *extra):
         return {}
 
 
-def comments_text(url: str, limit: int = 40, budget: int = 5000) -> str:
+def comments_text(url: str, limit: int = 25, budget: int = 3000) -> str:
     """게시자·고정 댓글을 먼저, 그다음 좋아요 순으로 모은 댓글 모음. 못 가져오면 ''."""
     extra = ["--write-comments"]
     if "youtube" in url:
@@ -357,6 +372,22 @@ def jsonld_recipe(html: str) -> str:
     return ""
 
 
+def gemini_read_page(url: str) -> str:
+    """사이트가 우리 서버(Render)의 접속을 막을 때: Google 서버가 대신 페이지를 읽게 한다(Gemini URL 도구). 못 읽으면 ''."""
+    prompt = ("다음 페이지의 요리 레시피(제목, 분량, 재료와 분량 전부, 조리 순서 전부, 팁)를 원문 그대로 빠짐없이 옮겨 적어라. "
+              f"요약하거나 지어내지 마라. 페이지를 못 읽거나 레시피가 없으면 READ_FAILED 한 단어만 답해라.\n{url}")
+    for model in MODELS:
+        try:
+            r = client.models.generate_content(model=model, contents=prompt,
+                                               config=types.GenerateContentConfig(tools=[types.Tool(url_context=types.UrlContext())]))
+            prefer(model)
+            t = (r.text or "").strip()
+            return "" if "READ_FAILED" in t[:40] else t
+        except genai.errors.APIError as e:
+            print("gemini_read_page failed:", model, e.code, flush=True)
+    return ""
+
+
 def fetch_webpage(url: str):
     """블로그/웹 페이지 -> (본문 텍스트, 대표 이미지 주소 또는 None). ponytail: 자바스크립트로 그리는 페이지는 본문이 비어 실패한다."""
     m = re.match(r"https?://blog\.naver\.com/([\w-]+)/(\d+)", url)
@@ -380,8 +411,11 @@ def make_recipe(url: str, text: str | None = None):
         if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
             # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
             thumb = youtube_thumb(url, d)
-            caption = with_comments(url, ytdlp_json(url).get("description") or "")  # 설명란 + (레시피가 없으면) 댓글
-            return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), caption).text), thumb, author_for(url)
+            desc = ytdlp_json(url).get("description") or ""
+            if strong_recipe(desc):  # 설명란에 레시피가 다 있으면 영상을 보내지 않는다
+                return json.loads(generate(None, desc).text), thumb, author_for(url)
+            caption = with_comments(url, desc)  # 설명란 + (레시피가 없으면) 댓글
+            return json.loads(generate(types.Part(file_data=types.FileData(file_uri=url)), caption, low_res=True).text), thumb, author_for(url)
         if "instagram.com" in url and instagram_kind(url) == "image":
             # 사진 게시물(여러 장 포함): 캡션 + 사진 전체를 Gemini에 넘긴다
             page = embed_page(url)
@@ -390,12 +424,23 @@ def make_recipe(url: str, text: str | None = None):
                 with http_get(u) as r:
                     parts.append(types.Part.from_bytes(data=r.read(), mime_type=r.headers.get_content_type() or "image/jpeg"))
             return json.loads(generate(parts, embed_caption(page)).text), instagram_cover(url, d), author_for(url)
+        if "instagram.com" in url and not VIDEO_ALWAYS:
+            try:
+                cap = embed_caption(embed_page(url))
+            except Exception:
+                cap = ""
+            if strong_recipe(cap):  # 캡션에 레시피가 다 있으면 영상을 받지도, 보내지도 않는다
+                return json.loads(generate(None, cap).text), instagram_cover(url, d), author_for(url)
         if "instagram.com" not in url:  # 일반 사이트: 본문을 먼저 읽는다 (영상 다운로드·인스타용 쿠키 검사를 거치지 않는다)
             page_err = None
             try:
                 text, img = fetch_webpage(url)
             except Exception as e2:
                 text, img, page_err = "", None, f"웹 페이지 읽기 실패: {e2}"
+            if len(text) < 200:  # 직접 읽기가 막혔거나 비었으면 Google 서버로 읽어 본다
+                text = gemini_read_page(url)
+                if len(text) >= 200:
+                    print("page read via gemini url tool", flush=True)
             if len(text) >= 200:
                 thumb = None
                 if img:
@@ -440,11 +485,11 @@ def needs_ko(title: str) -> bool:
 
 def ask(prompt: str):
     """짧은 텍스트 질문 하나. 모델이 막히면 다음 모델로, 전부 실패하면 None."""
-    for model in MODELS:
+    for model in sorted(MODELS, key=lambda m: "lite" not in m):  # 가벼운 모델 먼저 (안정 정렬)
         try:
-            text = (client.models.generate_content(model=model, contents=prompt).text or "").strip()
-            prefer(model)
-            return text
+            r = client.models.generate_content(model=model, contents=prompt)
+            log_usage("ask", model, r)
+            return (r.text or "").strip()
         except genai.errors.APIError as e:
             print("ask failed:", model, e.code, flush=True)
     return None
@@ -565,8 +610,8 @@ def preview_title(job_id: str, url: str):
         jobs[job_id]["title"] = dish
 
 
-def generate(f, caption):
-    """f: 영상 파일 / 이미지 Part 목록 / None(글만)"""
+def generate(f, caption, low_res=False):
+    """f: 영상 파일 / 이미지 Part 목록 / None(글만). low_res: 영상 프레임 해상도를 낮춰 토큰을 줄인다(음성 중심 영상용)."""
     media = [] if f is None else f if isinstance(f, list) else [f]
     err = None
     for attempt in range(3):
@@ -575,8 +620,10 @@ def generate(f, caption):
                 r = client.models.generate_content(
                     model=model,
                     contents=[*media, PROMPT.format(caption=caption)],
-                    config={"response_mime_type": "application/json", "response_schema": Recipe},
+                    config={"response_mime_type": "application/json", "response_schema": Recipe,
+                            **({"media_resolution": types.MediaResolution.MEDIA_RESOLUTION_LOW} if low_res else {})},
                 )
+                log_usage("recipe", model, r)
                 prefer(model)
                 return r
             except genai.errors.APIError as e:
@@ -671,8 +718,8 @@ def check(token):
 
 
 def by_url(url):
-    r = db("SELECT id, data, folder_id, thumb, author, author_url FROM recipes WHERE url = ?", (url,))
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4], "author_url": r[0][5]} if r else None
+    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url FROM recipes WHERE url = ?", (url,))
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5]} if r else None
 
 
 def work(job_id: str, url: str, folder_id, text=None):
@@ -740,8 +787,8 @@ def library(x_token: str | None = Header(None)):
         expire(k)
     return {
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
-        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": r[3], "ings": r[4], "author": r[5]}
-                    for r in db("SELECT id, title, folder_id, thumb, ings, author FROM recipes ORDER BY created DESC")],
+        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": bool(r[3]), "ings": r[4], "author": r[5]}
+                    for r in db("SELECT id, title, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, ings, author FROM recipes ORDER BY created DESC")],
         "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error", "title") if x in v}}
                  for k, v in jobs.items() if v["status"] != "done"],
     }
@@ -750,10 +797,10 @@ def library(x_token: str | None = Header(None)):
 @app.get("/api/recipes/{rid}")
 def get_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)
-    r = db("SELECT id, data, folder_id, thumb, author, author_url, share FROM recipes WHERE id = ?", (rid,))
+    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, share FROM recipes WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "레시피를 찾을 수 없습니다")
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": r[0][3], "author": r[0][4], "author_url": r[0][5], "share": r[0][6]}
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "share": r[0][6]}
 
 
 @app.patch("/api/recipes/{rid}")
@@ -833,6 +880,16 @@ def shared(token: str):
         return HTMLResponse("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><meta name=robots content=noindex>"
                             "<body style='font:18px/1.5 sans-serif;color:#2b35ff;padding:20px'>공유가 중지되었거나 없는 레시피입니다.</body>", status_code=404, headers=NO_INDEX)
     return HTMLResponse(share_page(r[0][0], json.loads(r[0][1]), bool(r[0][2]), token), headers=NO_INDEX)
+
+
+@app.get("/t/{rid}.jpg")
+def thumb_image(rid: str):
+    """목록·상세 썸네일. 주소의 id는 추측할 수 없는 값이라 별도 토큰 없이 열고, 브라우저가 1년간 캐시한다(목록 JSON에서 이미지 본문을 뺀 대신)."""
+    r = db("SELECT thumb FROM recipes WHERE id = ?", (rid,)) if re.fullmatch(r"[0-9a-f]{32}", rid) else []
+    if not r or not r[0][0]:
+        raise HTTPException(404)
+    return Response(base64.b64decode(r[0][0].split(",", 1)[1]), media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=31536000, immutable", "X-Robots-Tag": "noindex", "Referrer-Policy": "no-referrer"})
 
 
 @app.get("/s/{token}/thumb.jpg")
