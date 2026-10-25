@@ -134,11 +134,13 @@ def fetch_embed(url: str, d: str):
 
 def fetch(url: str, d: str):
     base = ["yt-dlp", "--no-playlist", "--no-warnings"]
-    if COOKIES:
+    if COOKIES and "instagram.com" in url:
         base += ["--cookies-from-browser", COOKIES]
-    if COOKIES_ERR:
+    if "instagram.com" not in url:
+        pass  # 쿠키는 인스타그램에만 쓴다 (다른 사이트에 로그인 정보를 보내지 않는다)
+    elif COOKIES_ERR:
         raise HTTPException(500, COOKIES_ERR)
-    if COOKIES_TXT:
+    elif COOKIES_TXT:
         lines = COOKIES_TXT.splitlines()
         if not any(l.count("\t") == 6 for l in lines):  # 탭 7칸 = 정상 쿠키 줄
             raise HTTPException(500, "쿠키 설정이 올바르지 않습니다 (Netscape 형식 쿠키 줄이 없음). COOKIES_B64를 다시 만드세요.")
@@ -318,6 +320,43 @@ class _Text(HTMLParser):
             self.out.append(data.strip())
 
 
+def jsonld_recipe(html: str) -> str:
+    """페이지에 심긴 schema.org Recipe 데이터를 읽기 쉬운 글로. 없으면 ''. 본문 글보다 재료·순서가 정확하다."""
+    def walk(v):
+        if isinstance(v, list):
+            for x in v:
+                yield from walk(x)
+        elif isinstance(v, dict):
+            t = v.get("@type")
+            if t == "Recipe" or (isinstance(t, list) and "Recipe" in t):
+                yield v
+            for x in v.values():
+                if isinstance(x, (list, dict)):
+                    yield from walk(x)
+
+    def steps(v):
+        if isinstance(v, str):
+            yield v
+        elif isinstance(v, list):
+            for x in v:
+                yield from steps(x)
+        elif isinstance(v, dict):
+            yield from steps(v.get("itemListElement") or v.get("text") or v.get("name") or "")
+
+    for m in re.finditer(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.S | re.I):
+        try:
+            for r in walk(json.loads(htmllib.unescape(m[1]).strip())):
+                ings = [htmllib.unescape(str(i)) for i in r.get("recipeIngredient") or []]
+                howto = [htmllib.unescape(re.sub(r"<[^>]+>", " ", x)).strip() for x in steps(r.get("recipeInstructions"))]
+                if ings or howto:
+                    y = r.get("recipeYield"); y = ", ".join(map(str, y)) if isinstance(y, list) else y
+                    return (f"[구조화된 레시피 데이터]\n이름: {r.get('name', '')}\n분량: {y or ''}\n총 시간: {r.get('totalTime', '')}\n"
+                            "재료:\n" + "\n".join(f"- {i}" for i in ings) + "\n순서:\n" + "\n".join(f"{n}. {x}" for n, x in enumerate(howto, 1)) + "\n\n")
+        except (ValueError, TypeError):
+            continue
+    return ""
+
+
 def fetch_webpage(url: str):
     """블로그/웹 페이지 -> (본문 텍스트, 대표 이미지 주소 또는 None). ponytail: 자바스크립트로 그리는 페이지는 본문이 비어 실패한다."""
     m = re.match(r"https?://blog\.naver\.com/([\w-]+)/(\d+)", url)
@@ -327,10 +366,10 @@ def fetch_webpage(url: str):
         html = r.read(3_000_000).decode(r.headers.get_content_charset() or "utf-8", "ignore")
     t = _Text()
     t.feed(html)
-    text = re.sub(r"\s+", " ", " ".join(t.out))[:20000]
+    text = re.sub(r"\s+", " ", " ".join(t.out))[:20000]  # 구조화 데이터가 있으면 아래에서 앞에 붙는다
     og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', html) \
         or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html)
-    return text, urllib.parse.urljoin(url, og[1]) if og else None
+    return jsonld_recipe(html) + text, urllib.parse.urljoin(url, og[1]) if og else None
 
 
 def make_recipe(url: str, text: str | None = None):
@@ -351,27 +390,28 @@ def make_recipe(url: str, text: str | None = None):
                 with http_get(u) as r:
                     parts.append(types.Part.from_bytes(data=r.read(), mime_type=r.headers.get_content_type() or "image/jpeg"))
             return json.loads(generate(parts, embed_caption(page)).text), instagram_cover(url, d), author_for(url)
-        try:
-            video, caption = fetch(url, d)
-        except HTTPException as e:
-            if "instagram.com" in url:
-                raise
-            # 영상이 아니면 웹 페이지 본문으로 시도 (실패하면 영상 다운로드 오류도 함께 보여준다)
+        if "instagram.com" not in url:  # 일반 사이트: 본문을 먼저 읽는다 (영상 다운로드·인스타용 쿠키 검사를 거치지 않는다)
+            page_err = None
             try:
                 text, img = fetch_webpage(url)
             except Exception as e2:
-                raise HTTPException(502, f"{e.detail} | 웹 페이지 읽기도 실패: {e2}")
-            if len(text) < 200:
-                raise HTTPException(502, f"{e.detail} | 페이지에서 본문을 읽지 못했습니다 (로그인이 필요하거나 스크립트로 그리는 페이지일 수 있어요)")
-            thumb = None
-            if img:
-                try:
-                    with http_get(img) as r, open(f"{d}/og.jpg", "wb") as f:
-                        f.write(r.read())
-                    thumb = thumb_from(f"{d}/og.jpg", d, still=True)
-                except Exception as e3:
-                    print("og:image failed:", e3, flush=True)
-            return json.loads(generate(None, text).text), thumb, author_for(url)
+                text, img, page_err = "", None, f"웹 페이지 읽기 실패: {e2}"
+            if len(text) >= 200:
+                thumb = None
+                if img:
+                    try:
+                        with http_get(img) as r, open(f"{d}/og.jpg", "wb") as f:
+                            f.write(r.read())
+                        thumb = thumb_from(f"{d}/og.jpg", d, still=True)
+                    except Exception as e3:
+                        print("og:image failed:", e3, flush=True)
+                return json.loads(generate(None, text).text), thumb, author_for(url)
+            try:  # 본문이 없으면 페이지에 영상이 있는지 시도
+                video, caption = fetch(url, d)
+            except HTTPException as e:
+                raise HTTPException(502, f"{page_err or '페이지에서 읽을 수 있는 본문이 거의 없습니다 (로그인이 필요하거나, 스크립트로 그리는 페이지이거나, 사이트가 서버 접속을 막았을 수 있어요)'} | 영상도 찾지 못했습니다: {e.detail}")
+        else:
+            video, caption = fetch(url, d)
         caption = with_comments(url, caption)
         thumb = instagram_cover(url, d) or thumb_from(str(video), d)  # 대표 이미지 우선, 없으면 영상 프레임
         f = client.files.upload(file=str(video))
