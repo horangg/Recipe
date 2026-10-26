@@ -54,6 +54,10 @@
   #sheet { position:fixed; inset:0; background:var(--bg); padding:20px; z-index:10; }
   #sheet[hidden] { display:none; }
   #sheet form { display:grid; grid-template-columns:1fr auto; gap:16px; align-items:end; }
+  #sheet.paste form { grid-template-columns:1fr; }
+  textarea { font:inherit; color:inherit; background:transparent; border:1px solid var(--fg); border-radius:0; padding:8px; width:100%; resize:vertical; outline:none; -webkit-appearance:none; appearance:none; }
+  textarea::placeholder { color:var(--dim); }
+  #sheet.paste #b { justify-self:end; }
   .detail #q, .detail #fab { display:none; }
   /* 편집(여러 개 선택) */
   .item.sel { grid-template-columns:20px 56px 1fr; cursor:pointer; }
@@ -75,10 +79,12 @@
 <button id="fab" aria-label="레시피 추가" onclick="openSheet()"></button>
 <div id="sheet" hidden>
   <form id="f">
-    <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 또는 레시피 글 붙여넣기" required>
+    <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 붙여넣기">
+    <textarea id="t" rows="9" hidden placeholder="레시피 본문을 붙여넣기 (재료, 만드는 순서 등)"></textarea>
+    <input id="src" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="원본 링크 (선택)" hidden>
     <button class="txt" id="b">추출 →</button>
   </form>
-  <div class="r" style="margin-top:16px"><button class="txt" onclick="closeSheet()">닫기</button></div>
+  <div class="r" style="margin-top:16px"><button class="txt" id="mode" onclick="togglePaste()">본문 붙여넣기</button> &nbsp; <button class="txt" onclick="closeSheet()">닫기</button></div>
 </div>
 
 <script>
@@ -258,14 +264,21 @@ async function unshare(id) {
 async function delRecipe(id) { if (confirm('이 레시피를 삭제할까요?')) { await api('/api/recipes/' + id, 'DELETE'); await loadLib().catch(() => {}); location.hash = ''; } }
 
 // ---- 추출 (우측 하단 + 버튼 -> 링크 입력창)
-function openSheet() { $('sheet').hidden = false; $('u').focus(); }
+let pasting = false;
+function togglePaste() {   // 링크 입력 <-> 본문 붙여넣기
+  pasting = !pasting; $('sheet').classList.toggle('paste', pasting);
+  $('u').hidden = pasting; $('t').hidden = !pasting; $('src').hidden = !pasting;
+  $('mode').textContent = pasting ? '링크로 추가' : '본문 붙여넣기';
+  (pasting ? $('t') : $('u')).focus();
+}
+function openSheet() { $('sheet').hidden = false; (pasting ? $('t') : $('u')).focus(); }
 function closeSheet() { $('sheet').hidden = true; }
 
-async function go(url) {
+async function go(url, text) {
   const banner = title => $('jobs').innerHTML = `<div class="r c2"><div>분석 중…</div><div class="dim clip">${esc(title || '30초~2분 소요')}</div></div>`;  // 링크 대신 요리 제목
   $('fab').disabled = true; banner();
   try {
-    let d = await api('/api/recipe', 'POST', { url, folder_id: cur.length > 4 ? cur : null });
+    let d = await api('/api/recipe', 'POST', { url, text, folder_id: cur.length > 4 ? cur : null });
     const id = d.id;  // job 응답에는 id가 없으므로 따로 보관
     while (d.status === 'pending') {  // 짧은 요청을 반복해 Safari/프록시 타임아웃을 피함
       await new Promise(r => setTimeout(r, 3000));
@@ -287,7 +300,16 @@ function route() {
 }
 addEventListener('hashchange', route);
 $('q').addEventListener('input', e => { q = e.target.value; renderList(); });
-$('f').onsubmit = e => { e.preventDefault(); const url = $('u').value.trim(); closeSheet(); go(url); };
+$('f').onsubmit = e => {
+  e.preventDefault();
+  if (pasting) {
+    const text = $('t').value.trim(), url = $('src').value.trim();
+    if (text.length < 30) { setStatus('본문이 너무 짧아요 (30자 이상 붙여넣어 주세요)'); return; }
+    closeSheet(); go(url, text); $('t').value = ''; $('src').value = '';
+  } else {
+    const url = $('u').value.trim(); if (!url) return; closeSheet(); go(url);
+  }
+};
 
 // ?token=, ?url= (단축어/공유에서 열릴 때)
 const qs = new URLSearchParams(location.search);

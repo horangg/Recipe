@@ -79,6 +79,7 @@ PROMPT = """첨부된 요리 콘텐츠(영상, 사진 게시물, 또는 글)를 
 - 조리 순서는 섹션으로 나누고, 각 단계에 그 단계에 쓰는 재료를 붙여라. timestamp는 영상일 때만 해당 시점(mm:ss)을 쓰고, 사진·글이면 빈 문자열.
 - 모든 글(title, servings, 재료 이름·분량, 섹션 제목, 단계, 팁)을 한국어로 쓰고 영어 단어를 남기지 않는다(KFC 같은 브랜드 약어 제외). 단위는 한국식으로: tsp→작은술, tbsp→큰술, cup→컵 (예: "2큰술").
 - title은 자연스러운 한국어 요리 이름으로 쓰고(외국 음식은 한국에서 통용되는 표기나 한글 음역), 영어 제목을 그대로 쓰지 않는다.
+- tips에는 콘텐츠에 실제로 적힌(말한) 팁만 넣고, 없으면 빈 목록으로 둔다. 일반 상식이나 곁들임 추천을 네가 덧붙이지 마라.
 - 콘텐츠에 없는 내용은 지어내지 마라. 요리 레시피가 아니면 title에 "레시피 아님"이라고 쓰고 나머지는 비워라.
 
 캡션/본문:
@@ -413,7 +414,7 @@ def fetch_webpage(url: str):
 def make_recipe(url: str, text: str | None = None):
     """(레시피 dict, 썸네일 data URI 또는 None, (게시자 이름, 프로필 주소))"""
     if text:  # 링크 없이 붙여넣은 레시피 글
-        return json.loads(generate(None, text).text), None, (None, None)
+        return json.loads(generate(None, text).text), None, (author_for(url) if url.startswith('http') else (None, None))  # 원본 링크를 같이 줬다면 게시자(사이트)도 채운다
     with tempfile.TemporaryDirectory() as d:
         if re.match(r"https?://(www\.|m\.)?(youtube\.com|youtu\.be)/", url):
             # 유튜브는 다운로드 없이 Gemini가 URL로 직접 시청 (클라우드 IP 차단 회피)
@@ -813,8 +814,12 @@ threading.Thread(target=queue_worker, daemon=True).start()
 def recipe(body: dict, x_token: str | None = Header(None)):
     check(x_token)
     m = re.search(r"https?://\S+", body.get("url") or "")  # 공유 텍스트에서 링크만 추출
-    text = None
-    if m:
+    text = (body.get("text") or "").strip()[:20000] or None  # 직접 붙여넣은 본문 (줄바꿈 유지)
+    if text:
+        if len(text) < 30:
+            raise HTTPException(400, "본문이 너무 짧아요 (30자 이상 붙여넣어 주세요)")
+        url = norm(m.group(0)) if m else "text:" + hashlib.sha1(text.encode()).hexdigest()[:16]  # 원본 링크가 있으면 그 주소로 저장
+    elif m:
         url = norm(m.group(0))
     elif len(t := (body.get("url") or "").strip()) >= 30:  # 링크가 없고 글이 충분히 길면 레시피 본문으로 본다
         text, url = t, "text:" + hashlib.sha1(t.encode()).hexdigest()[:16]
