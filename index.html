@@ -82,6 +82,7 @@
     <input id="u" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="링크 붙여넣기">
     <textarea id="t" rows="9" hidden placeholder="레시피 본문을 붙여넣기 (재료, 만드는 순서 등)"></textarea>
     <input id="src" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="원본 링크 (선택)" hidden>
+    <input id="timg" type="text" inputmode="url" autocapitalize="off" autocorrect="off" placeholder="썸네일 이미지 주소 (선택)" hidden>
     <button class="txt" id="b">추출 →</button>
   </form>
   <div class="r" style="margin-top:16px"><button class="txt" id="mode" onclick="togglePaste()">본문 붙여넣기</button> &nbsp; <button class="txt" onclick="closeSheet()">닫기</button></div>
@@ -91,7 +92,7 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const store = { get: k => { try { return localStorage[k] || ''; } catch { return ''; } }, set: (k, v) => { try { localStorage[k] = v; } catch {} } };
-const thumb = r => r.thumb ? `<img class="th" src="/t/${r.id}.jpg" width="56" height="56" loading="lazy" decoding="async" alt="">` : '<div class="ph"></div>';
+const thumb = r => r.thumb ? `<img class="th" src="/t/${r.id}.jpg?v=${r.tv || 0}" width="56" height="56" loading="lazy" decoding="async" alt="">` : '<div class="ph"></div>';
 const setStatus = t => { $('status').textContent = t; };
 const subline = parts => { const t = parts.filter(Boolean).join(' · '); return t ? `<br><span class="dim">${esc(t)}</span>` : ''; };
 
@@ -228,7 +229,7 @@ async function showRecipe(id) {
     const [r] = await Promise.all([api('/api/recipes/' + id), lib.folders.length ? 0 : loadLib()]);
     let n = 0;  // 요리 순서 번호: 섹션이 바뀌어도 이어서 센다
     $('main').innerHTML = `
-      <div class="r ra"><a href="#">← 목록</a><span><button class="txt" onclick="shareRecipe('${r.id}', ${esc(JSON.stringify(r.title))}, ${esc(JSON.stringify(r.share || ''))})">공유</button>${r.share ? ' &nbsp; <button class="txt" onclick="unshare(\'' + r.id + '\')">공유 중지</button>' : ''} &nbsp; <button class="txt" onclick="delRecipe('${r.id}')">삭제</button></span></div>
+      <div class="r ra"><a href="#">← 목록</a><span><button class="txt" onclick="setThumb('${r.id}')">썸네일</button> &nbsp; <button class="txt" onclick="shareRecipe('${r.id}', ${esc(JSON.stringify(r.title))}, ${esc(JSON.stringify(r.share || ''))})">공유</button>${r.share ? ' &nbsp; <button class="txt" onclick="unshare(\'' + r.id + '\')">공유 중지</button>' : ''} &nbsp; <button class="txt" onclick="delRecipe('${r.id}')">삭제</button></span></div>
       <div class="head">${thumb(r)}<div><div class="title">${esc(r.title)}</div>${r.author ? (r.author_url ? `<a class="dim" href="${esc(r.author_url)}" target="_blank" rel="noopener">${esc(r.author)}</a>` : `<div class="dim">${esc(r.author)}</div>`) : ''}</div></div>
       <div class="r c3"><div><div class="dim">분량</div><div>${esc(r.servings)}</div></div>
         <div><div class="dim">시간</div><div>${r.minutes}분</div></div>
@@ -261,24 +262,54 @@ async function unshare(id) {
   if (!confirm('공유를 중지할까요? 이미 보낸 링크는 더 이상 열리지 않습니다.')) return;
   await api('/api/recipes/' + id + '/share', 'DELETE'); await showRecipe(id); setStatus('공유를 중지했어요');
 }
+// ---- 썸네일 나중에 추가/변경: 이미지 주소를 넣거나, 비워 두고 확인하면 기기에서 사진을 고른다
+function pickPhoto() {
+  return new Promise(res => {
+    const i = document.createElement('input'); i.type = 'file'; i.accept = 'image/*';
+    i.addEventListener('cancel', () => res(null));
+    i.onchange = () => {
+      const f = i.files[0]; if (!f) return res(null);
+      const img = new Image(), url = URL.createObjectURL(f);
+      img.onload = () => {   // 가운데를 정사각형으로 잘라 줄여서 올린다 (사진 원본은 서버에 안 보낸다)
+        const n = Math.min(img.width, img.height), c = document.createElement('canvas'); c.width = c.height = 256;
+        c.getContext('2d').drawImage(img, (img.width - n) / 2, (img.height - n) / 2, n, n, 0, 0, 256, 256);
+        URL.revokeObjectURL(url); res(c.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); res(null); };
+      img.src = url;
+    };
+    i.click();
+  });
+}
+async function setThumb(id) {
+  const u = prompt('썸네일 이미지 주소를 붙여넣어 주세요.\n주소 없이 확인을 누르면 사진을 고를 수 있어요.');
+  if (u === null) return;
+  setStatus('썸네일을 올리는 중…');
+  try {
+    const body = u.trim() ? { url: u.trim() } : { data: await pickPhoto() };
+    if (!body.url && !body.data) { setStatus(''); return; }
+    await api('/api/recipes/' + id + '/thumb', 'PUT', body);
+    await loadLib().catch(() => {}); await showRecipe(id); setStatus('썸네일을 바꿨어요');
+  } catch (e) { setStatus(e.message); }
+}
 async function delRecipe(id) { if (confirm('이 레시피를 삭제할까요?')) { await api('/api/recipes/' + id, 'DELETE'); await loadLib().catch(() => {}); location.hash = ''; } }
 
 // ---- 추출 (우측 하단 + 버튼 -> 링크 입력창)
 let pasting = false;
 function togglePaste() {   // 링크 입력 <-> 본문 붙여넣기
   pasting = !pasting; $('sheet').classList.toggle('paste', pasting);
-  $('u').hidden = pasting; $('t').hidden = !pasting; $('src').hidden = !pasting;
+  $('u').hidden = pasting; $('t').hidden = !pasting; $('src').hidden = !pasting; $('timg').hidden = !pasting;
   $('mode').textContent = pasting ? '링크로 추가' : '본문 붙여넣기';
   (pasting ? $('t') : $('u')).focus();
 }
 function openSheet() { $('sheet').hidden = false; (pasting ? $('t') : $('u')).focus(); }
 function closeSheet() { $('sheet').hidden = true; }
 
-async function go(url, text) {
+async function go(url, text, thumb_url) {
   const banner = title => $('jobs').innerHTML = `<div class="r c2"><div>분석 중…</div><div class="dim clip">${esc(title || '30초~2분 소요')}</div></div>`;  // 링크 대신 요리 제목
   $('fab').disabled = true; banner();
   try {
-    let d = await api('/api/recipe', 'POST', { url, text, folder_id: cur.length > 4 ? cur : null });
+    let d = await api('/api/recipe', 'POST', { url, text, thumb_url, folder_id: cur.length > 4 ? cur : null });
     const id = d.id;  // job 응답에는 id가 없으므로 따로 보관
     while (d.status === 'pending') {  // 짧은 요청을 반복해 Safari/프록시 타임아웃을 피함
       await new Promise(r => setTimeout(r, 3000));
@@ -303,9 +334,9 @@ $('q').addEventListener('input', e => { q = e.target.value; renderList(); });
 $('f').onsubmit = e => {
   e.preventDefault();
   if (pasting) {
-    const text = $('t').value.trim(), url = $('src').value.trim();
+    const text = $('t').value.trim(), url = $('src').value.trim(), thumb_url = $('timg').value.trim();
     if (text.length < 30) { setStatus('본문이 너무 짧아요 (30자 이상 붙여넣어 주세요)'); return; }
-    closeSheet(); go(url, text); $('t').value = ''; $('src').value = '';
+    closeSheet(); go(url, text, thumb_url); $('t').value = ''; $('src').value = ''; $('timg').value = '';
   } else {
     const url = $('u').value.trim(); if (!url) return; closeSheet(); go(url);
   }

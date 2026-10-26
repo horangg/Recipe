@@ -1,4 +1,4 @@
-import base64, hashlib, html as htmllib, json, os, re, secrets, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
+import base64, hashlib, html as htmllib, ipaddress, json, os, re, secrets, socket, sqlite3, subprocess, tempfile, threading, time, urllib.parse, urllib.request, uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from html.parser import HTMLParser
@@ -164,6 +164,62 @@ def fetch(url: str, d: str):
             raise HTTPException(502, f"영상 다운로드 실패: {(errs or e.stderr.strip())[:300]} | 임베드 대체 경로도 실패: {e2}")
     video = next(Path(d).glob("v.*"))
     return video, meta.get("description") or meta.get("title") or ""
+
+
+def public_http(u: str):
+    """사용자가 준 주소로 서버가 접속하기 전 검사: http(s)이고, 주소가 공개 인터넷일 때만 통과 (내 서버 자신·클라우드 내부망·메타데이터 주소 차단)."""
+    p = urlparse(u)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise ValueError("http(s) 주소가 아니에요")
+    try:
+        ips = {a[4][0] for a in socket.getaddrinfo(p.hostname, p.port or 443)}
+    except OSError:
+        raise ValueError("주소를 찾을 수 없어요")
+    if not ips or any(not ipaddress.ip_address(i.split("%")[0]).is_global for i in ips):
+        raise ValueError("공개된 주소만 쓸 수 있어요")
+
+
+class _SafeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        public_http(newurl)  # 이동한 곳도 검사 (공개 주소가 내부 주소로 넘기는 우회 방지)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_opener = urllib.request.build_opener(_SafeRedirect)
+
+
+def thumb_from_url(u: str, d: str, depth: int = 0) -> str:
+    """이미지 주소(또는 이미지가 대표로 달린 웹 페이지 주소) -> 정사각형 썸네일 data URI. 실패하면 ValueError."""
+    public_http(u)
+    req = urllib.request.Request(u, headers={"User-Agent": UA, "Accept": "image/*,text/html;q=0.8,*/*;q=0.5"})
+    with _opener.open(req, timeout=20) as r:
+        ctype, data = r.headers.get_content_type(), r.read(8_000_001)
+    if len(data) > 8_000_000:
+        raise ValueError("이미지가 너무 커요 (8MB 이하)")
+    if ctype.startswith("image/"):
+        Path(f"{d}/img").write_bytes(data)
+        t = thumb_from(f"{d}/img", d, still=True)
+        if not t:
+            raise ValueError("이미지를 읽을 수 없어요")
+        return t
+    if ctype in ("text/html", "application/xhtml+xml") and depth == 0:  # 페이지 주소를 넣었다면 그 페이지의 대표 이미지(og:image)를 쓴다
+        html = data.decode("utf-8", "ignore")
+        og = re.search(r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)', html) or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']', html)
+        if og:
+            return thumb_from_url(urllib.parse.urljoin(u, htmllib.unescape(og[1])), d, 1)
+    raise ValueError("이미지 주소가 아니에요")
+
+
+def thumb_from_data(data_uri: str, d: str) -> str:
+    """기기에서 올린 사진(data URI) -> 정사각형 썸네일."""
+    m = re.fullmatch(r"data:image/(?:jpeg|png|webp|gif);base64,([A-Za-z0-9+/=]+)", data_uri or "")
+    if not m or len(data_uri) > 4_000_000:
+        raise ValueError("올바른 이미지가 아니에요")
+    Path(f"{d}/img").write_bytes(base64.b64decode(m[1]))
+    t = thumb_from(f"{d}/img", d, still=True)
+    if not t:
+        raise ValueError("이미지를 읽을 수 없어요")
+    return t
 
 
 def thumb_from(src: str, d: str, still: bool = False):
@@ -693,7 +749,11 @@ db("""CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, url TEXT UNIQUE N
 
 
 db("""CREATE TABLE IF NOT EXISTS queue (id TEXT PRIMARY KEY, url TEXT UNIQUE NOT NULL, folder_id TEXT, body TEXT, title TEXT, created TEXT NOT NULL)""")
-for col in ("thumb", "ings", "author", "author_url", "ko_ok", "share"):
+try:
+    db("ALTER TABLE queue ADD COLUMN thumb TEXT")
+except Exception:
+    pass
+for col in ("thumb", "ings", "author", "author_url", "ko_ok", "share", "thumb_v"):
     try:
         db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
     except Exception:
@@ -736,13 +796,14 @@ def check(token):
 
 
 def by_url(url):
-    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url FROM recipes WHERE url = ?", (url,))
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5]} if r else None
+    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, thumb_v FROM recipes WHERE url = ?", (url,))
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "tv": int(r[0][6] or 0)} if r else None
 
 
-def save_recipe(url: str, folder_id, text=None):
+def save_recipe(url: str, folder_id, text=None, user_thumb=None):
     """추출해서 저장한다. 한도 때문에 못 하면 Busy, 그 밖의 실패는 HTTPException/예외."""
     data, thumb, (author, author_url) = make_recipe(url, text)
+    thumb = user_thumb or thumb  # 직접 준 썸네일이 우선
     data = map_strings(data, ko_units)                      # 1) 영어 단위는 규칙으로 바로 고친다
     if en_strings(data) and data["title"].strip() != "레시피 아님":
         data = map_strings(ko_fix(data) or data, ko_units)  # 2) 영어가 남으면 AI로 한국어로 다시 쓴다
@@ -758,16 +819,16 @@ def save_recipe(url: str, folder_id, text=None):
        (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url, 1 if clean else None))
 
 
-def work(job_id: str, url: str, folder_id, text=None):
+def work(job_id: str, url: str, folder_id, text=None, user_thumb=None):
     try:
         if not text:
             threading.Thread(target=preview_title, args=(job_id, url), daemon=True).start()
-        save_recipe(url, folder_id, text)
+        save_recipe(url, folder_id, text, user_thumb)
         jobs[job_id]["status"], jobs[job_id]["recipe"] = "done", by_url(url)
     except Busy:  # 한도 초과: 실패로 끝내지 않고 대기열에 저장 -> 서버가 한도가 풀릴 때쯤 자동으로 다시 시도
         qid = new_id()
-        db("INSERT INTO queue (id, url, folder_id, body, title, created) VALUES (?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
-           (qid, url, folder_id, text, jobs[job_id].get("title"), now()))
+        db("INSERT INTO queue (id, url, folder_id, body, title, created, thumb) VALUES (?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+           (qid, url, folder_id, text, jobs[job_id].get("title"), now(), user_thumb))
         jobs[job_id].update(status="waiting")
     except HTTPException as e:
         jobs[job_id].update(status="error", error=e.detail)
@@ -786,13 +847,13 @@ def queue_worker():
         time.sleep(wait)
         try:
             fix_korean()  # 한도 때문에 영어로 남은 레시피도 이때 같이 고친다
-            for qid, url, folder_id, body, title, created in db("SELECT id, url, folder_id, body, title, created FROM queue ORDER BY created LIMIT 5"):
+            for qid, url, folder_id, body, title, created, qthumb in db("SELECT id, url, folder_id, body, title, created, thumb FROM queue ORDER BY created LIMIT 5"):
                 if (datetime.now(timezone.utc) - datetime.fromisoformat(created)).total_seconds() > QUEUE_MAX_AGE:
                     db("DELETE FROM queue WHERE id = ?", (qid,))
                     jobs["q" + qid] = {"status": "error", "url": url, "title": title, "error": "3일 동안 한도가 풀리지 않아 포기했어요. 다시 추가해 주세요"}
                     continue
                 try:
-                    save_recipe(url, folder_id, body)
+                    save_recipe(url, folder_id, body, qthumb)
                     db("DELETE FROM queue WHERE id = ?", (qid,))
                     print("queue: saved", url, flush=True)
                     wait = 300
@@ -827,9 +888,16 @@ def recipe(body: dict, x_token: str | None = Header(None)):
         raise HTTPException(400, "링크를 찾을 수 없습니다")
     if saved := by_url(url):
         return {"status": "done", "recipe": saved}
+    user_thumb = None
+    if (turl := (body.get("thumb_url") or "").strip()):  # 요청 때 바로 가져와서, 안 되면 곧장 알려준다
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                user_thumb = thumb_from_url(turl, d)
+            except Exception as e:
+                raise HTTPException(400, f"썸네일을 가져오지 못했어요: {e}")
     job_id = new_id()
     jobs[job_id] = {"status": "pending", "url": url, "t0": time.time()}
-    threading.Thread(target=work, args=(job_id, url, body.get("folder_id"), text), daemon=True).start()
+    threading.Thread(target=work, args=(job_id, url, body.get("folder_id"), text, user_thumb), daemon=True).start()
     return {"status": "pending", "id": job_id}
 
 
@@ -857,8 +925,8 @@ def library(x_token: str | None = Header(None)):
         expire(k)
     return {
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
-        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": bool(r[3]), "ings": r[4], "author": r[5]}
-                    for r in db("SELECT id, title, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, ings, author FROM recipes ORDER BY created DESC")],
+        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": bool(r[3]), "ings": r[4], "author": r[5], "tv": int(r[6] or 0)}
+                    for r in db("SELECT id, title, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, ings, author, thumb_v FROM recipes ORDER BY created DESC")],
         "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error", "title") if x in v}}
                  for k, v in jobs.items() if v["status"] not in ("done", "waiting")]
                 + [{"id": "q" + r[0], "status": "waiting", "url": r[1], "title": r[2]} for r in db("SELECT id, url, title FROM queue ORDER BY created")],
@@ -868,10 +936,10 @@ def library(x_token: str | None = Header(None)):
 @app.get("/api/recipes/{rid}")
 def get_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)
-    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, share FROM recipes WHERE id = ?", (rid,))
+    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, share, thumb_v FROM recipes WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "레시피를 찾을 수 없습니다")
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "share": r[0][6]}
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "share": r[0][6], "tv": int(r[0][7] or 0)}
 
 
 @app.patch("/api/recipes/{rid}")
@@ -989,6 +1057,27 @@ def bulk(body: dict, x_token: str | None = Header(None)):
     else:
         raise HTTPException(400, "알 수 없는 작업입니다")
     return {}
+
+
+@app.put("/api/recipes/{rid}/thumb")
+def set_thumb(rid: str, body: dict, x_token: str | None = Header(None)):
+    """저장된 레시피의 썸네일을 이미지 주소(url) 또는 기기에서 고른 사진(data)으로 추가·변경."""
+    check(x_token)
+    if not db("SELECT 1 FROM recipes WHERE id = ?", (rid,)):
+        raise HTTPException(404, "레시피를 찾을 수 없습니다")
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            if body.get("data"):
+                t = thumb_from_data(body["data"], d)
+            elif (body.get("url") or "").strip():
+                t = thumb_from_url(body["url"].strip(), d)
+            else:
+                raise ValueError("이미지 주소나 사진이 필요해요")
+        except Exception as e:
+            raise HTTPException(400, f"썸네일을 바꾸지 못했어요: {e}")
+    v = int(time.time())
+    db("UPDATE recipes SET thumb = ?, thumb_v = ? WHERE id = ?", (t, v, rid))
+    return {"v": v}
 
 
 @app.delete("/api/recipes/{rid}")
