@@ -153,6 +153,8 @@ async function showList() {
 // ---- 편집 모드(여러 개 선택) / 폴더 접기
 let editing = false, sel = new Set();
 let foldersOpen = store.get('foldersOpen') !== '0';   // 폴더 영역 펼침 여부
+let countriesOpen = store.get('countriesOpen') !== '0';   // 나라 영역 펼침 여부
+let curCountry = store.get('country') || '';   // '' = 모든 나라, '_' = 나라 미정, 그 외 = 나라 이름
 const fname = id => (lib.folders.find(f => f.id === id) || {}).name;
 
 function row(r, sub) {
@@ -160,6 +162,8 @@ function row(r, sub) {
   return editing ? `<div class="r item sel" onclick="toggleSel('${r.id}')"><span class="box ${sel.has(r.id) ? 'on' : ''}"></span>${body}</div>`
                  : `<a class="r item" href="#r/${r.id}">${body}</a>`;
 }
+function toggleCountries() { countriesOpen = !countriesOpen; store.set('countriesOpen', countriesOpen ? '1' : '0'); renderList(); }
+function setCountry(c) { curCountry = c; store.set('country', c); renderList(); }
 function toggleFolders() { foldersOpen = !foldersOpen; store.set('foldersOpen', foldersOpen ? '1' : '0'); renderList(); }
 function toggleEdit() { editing = !editing; sel.clear(); renderList(); }
 function toggleSel(id) { sel.has(id) ? sel.delete(id) : sel.add(id); renderList(); }
@@ -191,17 +195,22 @@ function renderList() {
     const hits = lib.recipes.filter(r => terms.every(t => (r.title + '|' + (r.ings || '') + '|' + (r.author || '') + '|' + (r.country || '')).toLowerCase().includes(t)));
     $('main').innerHTML = hits.length ? bar(hits.map(r => r.id)) + hits.map(r => {
       const hint = (r.ings || '').split('|').filter(n => terms.some(t => n.toLowerCase().includes(t) && !r.title.toLowerCase().includes(t)));
-      return row(r, subline([r.country, r.author, r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : '']));
+      return row(r, subline([r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : '']));
     }).join('') : bar([]) + '<div class="r dim">검색 결과가 없습니다.</div>';
     renderBar(); return;
   }
-  const shown = lib.recipes.filter(r => cur === 'all' || (cur === 'none' ? !r.folder_id : r.folder_id === cur));
+  const byFolder = lib.recipes.filter(r => cur === 'all' || (cur === 'none' ? !r.folder_id : r.folder_id === cur));
+  const cnt = {}; byFolder.forEach(r => { const k = r.country || '_'; cnt[k] = (cnt[k] || 0) + 1; });   // 지금 보는 폴더 안의 나라별 개수
+  const names = Object.keys(cnt).filter(k => k !== '_').sort((a, b) => cnt[b] - cnt[a] || a.localeCompare(b, 'ko'));
+  const cc = curCountry && cnt[curCountry] ? curCountry : '';   // 이 폴더에 없는 나라가 골라져 있으면 모든 나라로 본다
+  const shown = byFolder.filter(r => !cc || (cc === '_' ? !r.country : r.country === cc));
+  const copt = (id, label, n) => `<button class="txt ${cc === id ? 'on' : ''}" style="text-decoration:none" onclick="setCountry('${id}')">${esc(label)} <span class="dim">${n}</span></button>`;
   const opt = (id, label, n) => `<button class="txt ${cur === id ? 'on' : ''}" style="text-decoration:none" onclick="setCur('${id}')">${esc(label)} <span class="dim">${n}</span></button>`;
   const count = id => lib.recipes.filter(r => id === 'none' ? !r.folder_id : r.folder_id === id).length;  // 폴더별 레시피 수
   const inFolder = cur.length > 4;
   let list;
   if (!shown.length) list = '<div class="r dim">저장된 레시피가 없습니다. 우측 하단 + 버튼으로 링크를 추가해 보세요.</div>';
-  else list = shown.map(r => row(r, subline([r.country, r.author, cur === 'all' && r.folder_id ? fname(r.folder_id) : '']))).join('');
+  else list = shown.map(r => row(r, subline([cur === 'all' && r.folder_id ? fname(r.folder_id) : '']))).join('');
   $('main').innerHTML = `
     <div class="r c2"><div><button class="txt dim" style="text-decoration:none" onclick="toggleFolders()">${foldersOpen ? '▾' : '▸'} 폴더</button></div>
       ${foldersOpen ? `<div class="list cols2">${opt('all', '전체', lib.recipes.length)}${opt('none', '분류 안 됨', count('none'))}${lib.folders.map(f => opt(f.id, f.name, count(f.id))).join('')}
@@ -209,6 +218,9 @@ function renderList() {
       : `<div>${cur === 'all' ? '전체' : cur === 'none' ? '분류 안 됨' : esc(fname(cur) || '전체')} <span class="dim">${cur === 'all' ? lib.recipes.length : count(cur)}</span></div>`}</div>
     ${inFolder && fname(cur) ? `<div class="r ra"><span class="dim">${esc(fname(cur))}</span>
       <span><button class="txt" onclick="renameFolder()">이름 변경</button> &nbsp; <button class="txt" onclick="delFolder()">삭제</button></span></div>` : ''}
+    ${names.length ? `<div class="r c2"><div><button class="txt dim" style="text-decoration:none" onclick="toggleCountries()">${countriesOpen ? '▾' : '▸'} 나라</button></div>
+      ${countriesOpen ? `<div class="list cols2">${copt('', '전체', byFolder.length)}${names.map(n => copt(n, n, cnt[n])).join('')}${cnt._ ? copt('_', '미정', cnt._) : ''}</div>`
+      : `<div>${cc === '' ? '전체' : cc === '_' ? '미정' : esc(cc)} <span class="dim">${cc === '' ? byFolder.length : cnt[cc]}</span></div>`}</div>` : ''}
     ${bar(shown.map(r => r.id))}${list}`;
   renderBar();
 }
