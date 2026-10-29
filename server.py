@@ -69,6 +69,7 @@ class Recipe(BaseModel):
     ingredients: list[Ingredient]
     sections: list[Section]
     tips: list[str]
+    country: str = ""  # 요리의 나라(한국, 일본, 이탈리아 …). 특정 나라 요리가 아니면 빈 문자열
 
 
 PROMPT = """첨부된 요리 콘텐츠(영상, 사진 게시물, 또는 글)를 종합해 한국어 레시피를 만들어라.
@@ -79,6 +80,7 @@ PROMPT = """첨부된 요리 콘텐츠(영상, 사진 게시물, 또는 글)를 
 - 조리 순서는 섹션으로 나누고, 각 단계에 그 단계에 쓰는 재료를 붙여라. timestamp는 영상일 때만 해당 시점(mm:ss)을 쓰고, 사진·글이면 빈 문자열.
 - 모든 글(title, servings, 재료 이름·분량, 섹션 제목, 단계, 팁)을 한국어로 쓰고 영어 단어를 남기지 않는다(KFC 같은 브랜드 약어 제외). 단위는 한국식으로: tsp→작은술, tbsp→큰술, cup→컵 (예: "2큰술").
 - title은 자연스러운 한국어 요리 이름으로 쓰고(외국 음식은 한국에서 통용되는 표기나 한글 음역), 영어 제목을 그대로 쓰지 않는다.
+- country에는 요리의 나라를 짧은 한국어 이름으로 쓴다(예: 한국, 일본, 중국, 이탈리아, 프랑스, 미국, 멕시코, 인도, 태국, 베트남, 스페인, 터키, 그리스, 영국, 독일). 특정 나라의 요리가 아니거나 모르겠으면 빈 문자열.
 - tips에는 콘텐츠에 실제로 적힌(말한) 팁만 넣고, 없으면 빈 목록으로 둔다. 일반 상식이나 곁들임 추천을 네가 덧붙이지 마라.
 - 콘텐츠에 없는 내용은 지어내지 마라. 요리 레시피가 아니면 title에 "레시피 아님"이라고 쓰고 나머지는 비워라.
 
@@ -753,11 +755,49 @@ try:
     db("ALTER TABLE queue ADD COLUMN thumb TEXT")
 except Exception:
     pass
-for col in ("thumb", "ings", "author", "author_url", "ko_ok", "share", "thumb_v"):
+for col in ("thumb", "ings", "author", "author_url", "ko_ok", "share", "thumb_v", "country"):
     try:
         db(f"ALTER TABLE recipes ADD COLUMN {col} TEXT")  # 이미 있으면 에러 -> 무시 (SQLite/Postgres 공용)
     except Exception:
         pass
+
+
+COUNTRY_ALIAS = {"대한민국": "한국", "남한": "한국", "이태리": "이탈리아", "이탈리안": "이탈리아", "재팬": "일본", "차이나": "중국", "프랑스식": "프랑스", "usa": "미국", "미합중국": "미국",
+                 "영국(잉글랜드)": "영국", "타이": "태국", "베트남식": "베트남", "멕시칸": "멕시코", "인디아": "인도", "스페인식": "스페인", "터키(튀르키예)": "튀르키예", "터키": "튀르키예"}
+
+
+def norm_country(v) -> str:
+    """'일본 요리', '한국식', 'Korea' 같은 표기를 나라 이름 하나로 통일한다. 못 알아보면 ''."""
+    c = re.sub(r"\s*(요리|음식|풍|식)$", "", str(v or "").strip())
+    c = COUNTRY_ALIAS.get(c.lower(), COUNTRY_ALIAS.get(c, c))
+    return c if re.fullmatch(r"[가-힣]{2,8}", c) else ""
+
+
+def tag_countries(limit: int = 40) -> int:
+    """나라가 비어 있는(NULL) 레시피를 한 번의 AI 호출로 묶어서 태깅한다(토큰 절약). 태깅한 개수를 돌려준다.
+    특정 나라 요리가 아니면 ''로 기록해 다시 묻지 않고, AI가 막히거나 응답이 이상하면 NULL로 남겨 다음에 다시 한다."""
+    rows = db("SELECT id, title, ings FROM recipes WHERE country IS NULL ORDER BY created DESC LIMIT ?", (limit,))
+    if not rows:
+        return 0
+    items = [{"n": i, "제목": t, "재료": (g or "").replace("|", ", ")[:80]} for i, (_, t, g) in enumerate(rows)]
+    ans = ask("각 요리가 어느 나라의 요리인지 알려라. 나라는 짧은 한국어 이름 하나로 답한다(예: 한국, 일본, 중국, 이탈리아, 프랑스, 미국, 멕시코, 인도, 태국, 베트남, 스페인, 튀르키예, 그리스, 영국, 독일). "
+              "특정 나라의 요리가 아니거나 모르겠으면 빈 문자열로 답한다. 설명 없이 JSON 객체 하나만 출력한다. 키는 n(문자열), 값은 나라. 예: {\"0\": \"한국\", \"1\": \"\"}\n"
+              + json.dumps(items, ensure_ascii=False))
+    if not ans:
+        return 0
+    try:
+        res = json.loads(re.sub(r"^```(?:json)?|```$", "", ans.strip(), flags=re.M).strip())
+        assert isinstance(res, dict)
+    except Exception:
+        print("tag_countries: 응답을 읽을 수 없음", ans[:80], flush=True)
+        return 0
+    n = 0
+    for i, (rid, _, _) in enumerate(rows):
+        if str(i) in res:  # 응답에서 빠진 항목은 NULL로 남겨 다음에 다시 묻는다
+            db("UPDATE recipes SET country = ? WHERE id = ?", (norm_country(res[str(i)]), rid))
+            n += 1
+    print(f"tag_countries: {n}/{len(rows)}개 태깅", flush=True)
+    return n
 
 
 def ings_of(data: dict) -> str:  # 검색용: 재료 이름만 이어 붙인 문자열
@@ -796,8 +836,8 @@ def check(token):
 
 
 def by_url(url):
-    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, thumb_v FROM recipes WHERE url = ?", (url,))
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "tv": int(r[0][6] or 0)} if r else None
+    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, thumb_v, country FROM recipes WHERE url = ?", (url,))
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "tv": int(r[0][6] or 0), "country": r[0][7] or ""} if r else None
 
 
 def save_recipe(url: str, folder_id, text=None, user_thumb=None):
@@ -815,8 +855,9 @@ def save_recipe(url: str, folder_id, text=None, user_thumb=None):
     if not folder_id:
         folder_id = auto_folder(data)  # 폴더를 직접 고르지 않았으면 기존 폴더 중에서 자동 분류
     clean = not en_strings(data) and not needs_ko(data["title"])  # 한도 탓에 한국어 정리를 못 했으면 표시하지 않고, 나중에 fix_korean이 다시 한다
-    db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url, ko_ok) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
-       (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url, 1 if clean else None))
+    db("INSERT INTO recipes (id, url, title, data, folder_id, created, thumb, ings, author, author_url, ko_ok, country) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (url) DO NOTHING",
+       (new_id(), url, data["title"], json.dumps(data, ensure_ascii=False), folder_id, now(), thumb, ings_of(data), author, author_url, 1 if clean else None,
+        norm_country(data.get("country")) if "country" in data else None))  # 모델이 나라를 안 줬으면 NULL -> 나중에 일괄 태깅
 
 
 def work(job_id: str, url: str, folder_id, text=None, user_thumb=None):
@@ -847,6 +888,7 @@ def queue_worker():
         time.sleep(wait)
         try:
             fix_korean()  # 한도 때문에 영어로 남은 레시피도 이때 같이 고친다
+            tag_countries()  # 한도 때문에 못 한 나라 태그도 이때 이어서
             for qid, url, folder_id, body, title, created, qthumb in db("SELECT id, url, folder_id, body, title, created, thumb FROM queue ORDER BY created LIMIT 5"):
                 if (datetime.now(timezone.utc) - datetime.fromisoformat(created)).total_seconds() > QUEUE_MAX_AGE:
                     db("DELETE FROM queue WHERE id = ?", (qid,))
@@ -925,8 +967,8 @@ def library(x_token: str | None = Header(None)):
         expire(k)
     return {
         "folders": [{"id": r[0], "name": r[1]} for r in db("SELECT id, name FROM folders ORDER BY name")],
-        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": bool(r[3]), "ings": r[4], "author": r[5], "tv": int(r[6] or 0)}
-                    for r in db("SELECT id, title, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, ings, author, thumb_v FROM recipes ORDER BY created DESC")],
+        "recipes": [{"id": r[0], "title": r[1], "folder_id": r[2], "thumb": bool(r[3]), "ings": r[4], "author": r[5], "tv": int(r[6] or 0), "country": r[7] or ""}
+                    for r in db("SELECT id, title, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, ings, author, thumb_v, country FROM recipes ORDER BY created DESC")],
         "jobs": [{"id": k, **{x: v[x] for x in ("status", "url", "error", "title") if x in v}}
                  for k, v in jobs.items() if v["status"] not in ("done", "waiting")]
                 + [{"id": "q" + r[0], "status": "waiting", "url": r[1], "title": r[2]} for r in db("SELECT id, url, title FROM queue ORDER BY created")],
@@ -936,10 +978,10 @@ def library(x_token: str | None = Header(None)):
 @app.get("/api/recipes/{rid}")
 def get_recipe(rid: str, x_token: str | None = Header(None)):
     check(x_token)
-    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, share, thumb_v FROM recipes WHERE id = ?", (rid,))
+    r = db("SELECT id, data, folder_id, CASE WHEN thumb IS NULL THEN 0 ELSE 1 END, author, author_url, share, thumb_v, country FROM recipes WHERE id = ?", (rid,))
     if not r:
         raise HTTPException(404, "레시피를 찾을 수 없습니다")
-    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "share": r[0][6], "tv": int(r[0][7] or 0)}
+    return {**json.loads(r[0][1]), "id": r[0][0], "folder_id": r[0][2], "thumb": bool(r[0][3]), "author": r[0][4], "author_url": r[0][5], "share": r[0][6], "tv": int(r[0][7] or 0), "country": r[0][8] or ""}
 
 
 @app.patch("/api/recipes/{rid}")
@@ -1183,6 +1225,11 @@ def backfill():
     """썸네일/게시자가 비어 있는 기존 레시피를 서버 시작 때 채운다 (한 번에 최대 20개, 못 구하면 다음 시작 때 재시도).
     ponytail: 영구히 못 구하는 항목이 20개 넘게 쌓이면 뒤쪽이 밀린다 — 그때는 실패 표시 컬럼 추가."""
     fix_korean()
+    try:
+        while tag_countries():  # 40개씩 끝날 때까지 (한도에 걸리면 0을 돌려주고 멈춘다)
+            pass
+    except Exception as e:
+        print("tag_countries error:", e, flush=True)
     for rid, url, thumb, author, author_url in db("SELECT id, url, thumb, author, author_url FROM recipes WHERE thumb IS NULL OR author IS NULL OR author_url IS NULL ORDER BY created DESC LIMIT 20"):
         if thumb is None:
             with tempfile.TemporaryDirectory() as d:

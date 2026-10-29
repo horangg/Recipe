@@ -188,10 +188,10 @@ function renderList() {
   const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
   const bar = ids => (ids.length || editing) ? `<div class="r ra"><span class="dim">${editing ? '' : ids.length + '개'}</span><span>${editing ? `<button class="txt" onclick='selectAll(${JSON.stringify(ids)})'>전체 선택</button> &nbsp; ` : ''}<button class="txt" onclick="toggleEdit()">${editing ? '완료' : '편집'}</button></span></div>` : '';
   if (terms.length) {  // 검색: 폴더와 상관없이 전체에서 제목/재료로 찾는다 (여러 단어는 모두 포함)
-    const hits = lib.recipes.filter(r => terms.every(t => (r.title + '|' + (r.ings || '') + '|' + (r.author || '')).toLowerCase().includes(t)));
+    const hits = lib.recipes.filter(r => terms.every(t => (r.title + '|' + (r.ings || '') + '|' + (r.author || '') + '|' + (r.country || '')).toLowerCase().includes(t)));
     $('main').innerHTML = hits.length ? bar(hits.map(r => r.id)) + hits.map(r => {
       const hint = (r.ings || '').split('|').filter(n => terms.some(t => n.toLowerCase().includes(t) && !r.title.toLowerCase().includes(t)));
-      return row(r, subline([r.author, r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : '']));
+      return row(r, subline([r.country, r.author, r.folder_id ? fname(r.folder_id) : '', hint.length ? '재료: ' + hint.join(', ') : '']));
     }).join('') : bar([]) + '<div class="r dim">검색 결과가 없습니다.</div>';
     renderBar(); return;
   }
@@ -201,7 +201,7 @@ function renderList() {
   const inFolder = cur.length > 4;
   let list;
   if (!shown.length) list = '<div class="r dim">저장된 레시피가 없습니다. 우측 하단 + 버튼으로 링크를 추가해 보세요.</div>';
-  else list = shown.map(r => row(r, subline([r.author, cur === 'all' && r.folder_id ? fname(r.folder_id) : '']))).join('');
+  else list = shown.map(r => row(r, subline([r.country, r.author, cur === 'all' && r.folder_id ? fname(r.folder_id) : '']))).join('');
   $('main').innerHTML = `
     <div class="r c2"><div><button class="txt dim" style="text-decoration:none" onclick="toggleFolders()">${foldersOpen ? '▾' : '▸'} 폴더</button></div>
       ${foldersOpen ? `<div class="list cols2">${opt('all', '전체', lib.recipes.length)}${opt('none', '분류 안 됨', count('none'))}${lib.folders.map(f => opt(f.id, f.name, count(f.id))).join('')}
@@ -232,7 +232,7 @@ async function showRecipe(id) {
     let n = 0;  // 요리 순서 번호: 섹션이 바뀌어도 이어서 센다
     $('main').innerHTML = `
       <div class="r ra"><a href="#">← 목록</a><span><button class="txt" onclick="setThumb('${r.id}')">썸네일</button> &nbsp; <button class="txt" onclick="shareRecipe('${r.id}', ${esc(JSON.stringify(r.title))}, ${esc(JSON.stringify(r.share || ''))})">공유</button>${r.share ? ' &nbsp; <button class="txt" onclick="unshare(\'' + r.id + '\')">공유 중지</button>' : ''} &nbsp; <button class="txt" onclick="delRecipe('${r.id}')">삭제</button></span></div>
-      <div class="head">${thumb(r)}<div><div class="title">${esc(r.title)}</div>${r.author ? (r.author_url ? `<a class="dim" href="${esc(r.author_url)}" target="_blank" rel="noopener">${esc(r.author)}</a>` : `<div class="dim">${esc(r.author)}</div>`) : ''}</div></div>
+      <div class="head">${thumb(r)}<div><div class="title">${esc(r.title)}</div>${r.country ? `<div class="dim">${esc(r.country)}</div>` : ''}${r.author ? (r.author_url ? `<a class="dim" href="${esc(r.author_url)}" target="_blank" rel="noopener">${esc(r.author)}</a>` : `<div class="dim">${esc(r.author)}</div>`) : ''}</div></div>
       <div class="r c3"><div><div class="dim">분량</div><div>${esc(r.servings)}</div></div>
         <div><div class="dim">시간</div><div>${r.minutes}분</div></div>
         <div><div class="dim">원본</div><a href="${esc(r.url)}" target="_blank">열기 ↗</a></div></div>
