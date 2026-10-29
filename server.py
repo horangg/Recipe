@@ -1115,7 +1115,7 @@ def delete_folder(fid: str, x_token: str | None = Header(None)):
 
 def _build() -> str:  # 화면 파일 내용의 해시. 배포로 파일이 바뀌면 값이 달라진다
     h = hashlib.sha1()
-    for n in ("index.html", "sw.js", "manifest.json", "icon.png", "favicon.svg", "favicon-32.png"):
+    for n in ("index.html", "sw.js", "manifest.json", "icon.png", "favicon-32.png", "favicon-64.png"):
         h.update((HERE / n).read_bytes())
     return h.hexdigest()[:10]
 
@@ -1140,15 +1140,15 @@ def manifest():
     return FileResponse(HERE / "manifest.json")
 
 
-@app.get("/favicon.svg")
-def favicon_svg():
-    return FileResponse(HERE / "favicon.svg", media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
-
-
 @app.get("/favicon-32.png")
 @app.get("/favicon.ico")  # 브라우저가 기본으로 요청하는 주소 (PNG를 그대로 준다)
 def favicon_png():
     return FileResponse(HERE / "favicon-32.png", media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/favicon-64.png")
+def favicon_png64():
+    return FileResponse(HERE / "favicon-64.png", media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/icon.png")

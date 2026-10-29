@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="요리사 모자">
-  <rect width="512" height="512" rx="112" fill="#2b35ff"/>
-  <g fill="#fff">
-    <circle cx="170" cy="215" r="72"/><circle cx="256" cy="175" r="88"/><circle cx="342" cy="215" r="72"/>
-    <rect x="150" y="230" width="212" height="110"/>
-    <rect x="146" y="352" width="220" height="64" rx="14"/>
-  </g>
-  <g stroke="#2b35ff" stroke-width="10" stroke-linecap="round"><path d="M214 262v60M298 262v60"/></g>
-</svg>
